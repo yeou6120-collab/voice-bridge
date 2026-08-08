@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>語音擺位橋接頁（B0 PoC）</title>
+<title>語音擺位橋接頁</title>
 <style>
   /* 深色主題：色票對齊主專案 Stylesheet.html（--brand-blue/--bg/#7ec8f7），
      但本頁部署在 GAS 之外（GitHub Pages），刻意不引入該檔、自帶一份。 */
@@ -106,6 +106,14 @@
   #finalLines .line { border-bottom: 1px dashed rgba(255,255,255,0.10); padding: 2px 0; }
   #finalLines .line .t { color: var(--text-muted); font-size: 11px; margin-right: 6px; }
   #interimLine { min-height: 24px; font-size: 15px; color: var(--bright); font-style: italic; }
+  /* ── 命中回饋 ─────────────────────────────── */
+  #fbLines { min-height: 40px; max-height: 150px; overflow-y: auto; font-size: 13px; line-height: 1.6; }
+  #fbLines .fb { padding: 3px 0; border-bottom: 1px dashed rgba(255,255,255,0.10); }
+  #fbLines .fb .mk { font-weight: bold; margin-right: 6px; }
+  #fbLines .fb.ok .mk { color: var(--ok); }
+  #fbLines .fb.no .mk { color: var(--err); }
+  #fbLines .fb .dt { color: var(--text-muted); font-size: 11px; display: block; padding-left: 20px; }
+  #fbLines .fb-none { color: var(--text-muted); font-size: 12px; }
   #statusLine { font-size: 12px; color: var(--text-muted); margin-top: 6px; min-height: 16px; }
   #statusLine.err { color: var(--err); }
   #sendStat { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
@@ -113,7 +121,7 @@
 </head>
 <body>
   <h1>語音擺位橋接頁 <span id="engineBadge">偵測中…</span></h1>
-  <div class="sub">B0 PoC — 本頁為 top-level 靜態頁（GAS 之外），負責收音並將逐字稿回送考試頁。</div>
+  <div class="sub">本頁為 top-level 靜態頁（GAS 之外），負責收音、把逐字稿回送考試頁，並顯示假人動作回饋。</div>
 
   <!-- ── 設備自檢 ─────────────────────────── -->
   <div class="card">
@@ -133,6 +141,12 @@
     <div id="statusLine"></div>
   </div>
 
+  <!-- ── 命中回饋（考試頁回送）─────────────── -->
+  <div class="card">
+    <h2>假人動作回饋</h2>
+    <div id="fbLines"><div class="fb-none">尚未收到考試頁回饋——說一句口令試試。</div></div>
+  </div>
+
   <!-- ── 即時字幕 ─────────────────────────── -->
   <div class="card">
     <h2>即時字幕</h2>
@@ -148,17 +162,29 @@
 <script>
 'use strict';
 /* ============================================================
- * 語音擺位橋接頁（B0 PoC）
+ * 語音擺位橋接頁
  * - 收音必須在 top-level document：GAS 頁（含 ?page=xxx 彈窗）內的
  *   使用者程式碼永遠被包在 *.googleusercontent.com 巢狀 sandbox iframe，
  *   Permissions-Policy 擋死 microphone，故本頁部署於 GitHub Pages。
- * - 逐字稿協定（帶版本欄 v）：
- *     { type:'voice:transcript', v:1, text, final:true|false, ts }
+ * - 訊息協定雙向（帶版本欄 v，常數見下方 VOICE-PROTO 區塊）：
+ *     本頁 → 考試頁 voice:transcript（逐字稿）
+ *     考試頁 → 本頁 voice:feedback（假人動作命中回饋）
  * - 辨識三層：on-device Web Speech（Chrome 139+，zh-TW，processLocally）
  *   → 雲端 webkitSpeechRecognition（cmn-Hant-TW）→ 無語音（明示原因）。
  * ============================================================ */
 
-var PROTO_V = 1;
+/* ==== VOICE-PROTO-BEGIN（雙端逐字複本，勿單邊改）====
+   橋接頁部署在 GitHub Pages、考試頁部署在 GAS，是兩個互不相干的部署面，沒有共用檔案的可能，
+   所以協定以「兩份逐字相同的常數區塊」共用，由 test/voice_protocol_test.js 擋漂移。
+   BRIDGE_ORIGIN 是 B0 實測到的 e.origin 實值；橋接頁一搬家，這裡與橋接頁要一起改。 */
+var VOICE_PROTO = {
+  V: 1,                                                    // 協定版本（不相容變更才 +1；收到不同版本明確拒收並提示）
+  BRIDGE_URL: 'https://yeou6120-collab.github.io/voice-bridge/',
+  BRIDGE_ORIGIN: 'https://yeou6120-collab.github.io',       // 考試頁驗 e.origin＋回送 targetOrigin 用
+  MSG_TRANSCRIPT: 'voice:transcript',                       // 橋接頁 → 考試頁 { type, v, text, final, ts }
+  MSG_FEEDBACK: 'voice:feedback'                            // 考試頁 → 橋接頁 { type, v, ok, text, detail, ts }
+};
+/* ==== VOICE-PROTO-END ==== */
 
 /* ── opener 綁定：開頁時擷取一次，之後不重抓（防中途被換掉多播） ── */
 var boundOpener = window.opener || null;
@@ -174,7 +200,7 @@ function sendToOpener(text, isFinal) {
   if (!boundOpener) return false;
   try {
     boundOpener.postMessage(
-      { type: 'voice:transcript', v: PROTO_V, text: String(text), final: !!isFinal, ts: Date.now() },
+      { type: VOICE_PROTO.MSG_TRANSCRIPT, v: VOICE_PROTO.V, text: String(text), final: !!isFinal, ts: Date.now() },
       openerOrigin
     );
     sentCount++;
@@ -193,6 +219,44 @@ function setStatus(msg, isErr) {
   el.textContent = msg || '';
   el.className = isErr ? 'err' : '';
 }
+
+/* ── 命中回饋（考試頁 → 本頁）───────────────────────────────
+ * 考試頁把逐字稿丟給 3D 解析後，把「有沒有命中、假人做了什麼」回送本頁顯示——
+ * 使用者按住說話時眼睛在彈窗上（手持麥克風道具），回饋放這裡才看得到。
+ * 驗證以 e.source === boundOpener 為主：考試頁所在的 GAS 沙箱 origin 是動態的
+ * n-xxxx-script.googleusercontent.com，寫不死也猜不得，但「就是我開頁時綁的那個視窗」
+ * 這件事是確定的，比對 origin 字串更嚴格。 */
+var fbCount = 0;
+function onFeedback(d) {
+  var host = document.getElementById('fbLines');
+  if (!fbCount) host.innerHTML = '';
+  fbCount++;
+  var div = document.createElement('div');
+  div.className = 'fb ' + (d.ok ? 'ok' : 'no');
+  var mk = document.createElement('span');
+  mk.className = 'mk';
+  mk.textContent = d.ok ? '✓' : '✗';
+  div.appendChild(mk);
+  div.appendChild(document.createTextNode(String(d.text || '')));
+  if (d.detail) {
+    var dt = document.createElement('span');
+    dt.className = 'dt';
+    dt.textContent = String(d.detail);
+    div.appendChild(dt);
+  }
+  host.appendChild(div);
+  host.scrollTop = host.scrollHeight;
+}
+window.addEventListener('message', function (e) {
+  var d = e.data;
+  if (!d || d.type !== VOICE_PROTO.MSG_FEEDBACK) return;
+  if (!boundOpener || e.source !== boundOpener) return;
+  if (d.v !== VOICE_PROTO.V) {
+    setStatus('考試頁協定版本不符（收到 v' + d.v + '，本頁 v' + VOICE_PROTO.V + '）：請兩邊都重新整理。', true);
+    return;
+  }
+  onFeedback(d);
+});
 
 /* ── 設備自檢 ─────────────────────────────── */
 var CHECK_DEFS = [
@@ -493,6 +557,8 @@ window.addEventListener('DOMContentLoaded', function () {
   document.getElementById('btnClear').addEventListener('click', function () {
     document.getElementById('finalLines').innerHTML = '';
     document.getElementById('interimLine').textContent = '';
+    document.getElementById('fbLines').innerHTML = '<div class="fb-none">尚未收到考試頁回饋——說一句口令試試。</div>';
+    fbCount = 0;
   });
 });
 </script>
