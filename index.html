@@ -105,7 +105,17 @@
   }
   #finalLines .line { border-bottom: 1px dashed rgba(255,255,255,0.10); padding: 2px 0; }
   #finalLines .line .t { color: var(--text-muted); font-size: 11px; margin-right: 6px; }
-  #interimLine { min-height: 24px; font-size: 15px; color: var(--bright); font-style: italic; }
+  /* 口令輸入框＝辨識字幕＋打字輸入合一：按住說話時唯讀（辨識驅動），平時可打字 Enter 送出；
+     送出後保留原句供「誤辨改字重送」。body 的 user-select:none 會擋輸入框選字，這裡要解回來。 */
+  #cmdInput {
+    width: 100%; min-height: 36px;
+    background: var(--bg2); color: var(--bright);
+    border: 1px solid rgba(255,255,255,0.18); border-radius: 8px;
+    padding: 7px 10px; font-size: 15px; font-family: inherit;
+    -webkit-user-select: text; user-select: text;
+  }
+  #cmdInput:read-only { font-style: italic; border-color: var(--err); }
+  #cmdInput::placeholder { color: var(--text-muted); font-style: normal; font-size: 13px; }
   /* ── 命中回饋 ─────────────────────────────── */
   #fbLines { min-height: 40px; max-height: 150px; overflow-y: auto; font-size: 13px; line-height: 1.6; }
   #fbLines .fb { padding: 3px 0; border-bottom: 1px dashed rgba(255,255,255,0.10); }
@@ -147,10 +157,14 @@
     <div id="fbLines"><div class="fb-none">尚未收到考試頁回饋——說一句口令試試。</div></div>
   </div>
 
-  <!-- ── 即時字幕 ─────────────────────────── -->
+  <!-- ── 口令輸入／即時字幕 ─────────────────── -->
   <div class="card">
-    <h2>即時字幕</h2>
-    <div id="interimLine"></div>
+    <h2>口令輸入／即時字幕</h2>
+    <div style="display:flex; gap:8px; margin-bottom:8px;">
+      <input id="cmdInput" type="text" autocomplete="off" enterkeyhint="send"
+             placeholder="辨識文字會出現在這裡；也可直接打字，按 Enter 送出（辨識錯了可改字重送）">
+      <button id="btnSendCmd" style="flex:none;">送出</button>
+    </div>
     <div id="finalLines"></div>
     <div id="sendStat">已回送 0 則</div>
     <div class="btn-row">
@@ -171,6 +185,9 @@
  *     考試頁 → 本頁 voice:feedback（假人動作命中回饋）
  * - 辨識三層：on-device Web Speech（Chrome 139+，zh-TW，processLocally）
  *   → 雲端 webkitSpeechRecognition（cmn-Hant-TW）→ 無語音（明示原因）。
+ * - 口令輸入框＝辨識字幕＋打字輸入合一：按住說話時唯讀（辨識驅動）、
+ *   平時可打字 Enter 送出（誤辨可改字重送；辨識引擎全滅時打字仍可用）。
+ *   打字與語音走完全相同的 voice:transcript 回送鏈，考試頁無感。
  * ============================================================ */
 
 /* ==== VOICE-PROTO-BEGIN（雙端逐字複本，勿單邊改）====
@@ -355,7 +372,7 @@ function setEngineBadge() {
   var ptt = document.getElementById('pttBtn');
   if (engineMode === 'none') {
     ptt.disabled = true;
-    ptt.textContent = '語音不可用';
+    ptt.textContent = '語音不可用（可改用下方打字輸入）';
   } else {
     ptt.disabled = false;
     ptt.textContent = '🎙 按住說話';
@@ -450,6 +467,7 @@ function newRecognizer() {
 
 function onRecResult(ev) {
   var interim = '';
+  var inp = document.getElementById('cmdInput');
   for (var i = ev.resultIndex; i < ev.results.length; i++) {
     var r = ev.results[i];
     var text = r[0] ? r[0].transcript : '';
@@ -457,12 +475,27 @@ function onRecResult(ev) {
     if (r.isFinal) {
       appendFinalLine(text);
       sendToOpener(text, true);
+      inp.value = text;   // final 留在輸入框：辨識錯了放開後可直接改字 Enter 重送
     } else {
       interim += text;
     }
   }
-  document.getElementById('interimLine').textContent = interim;
-  if (interim) sendToOpener(interim, false);
+  if (interim) { inp.value = interim; sendToOpener(interim, false); }
+}
+
+/* ── 打字送出（與辨識共用同一個輸入框、同一條回送鏈）──────
+ * 按住說話期間輸入框唯讀（辨識驅動）；平時可打字，Enter 或「送出」鈕送出。
+ * 送出後整句選取（再打字即覆蓋、想改字直接點），不清空。
+ * 不依賴 SpeechRecognition——辨識引擎整個不可用時，打字仍是活路。 */
+function sendTyped() {
+  if (listening) return;
+  var inp = document.getElementById('cmdInput');
+  var text = inp.value.trim();
+  if (!text) return;
+  var ok = sendToOpener(text, true);
+  if (!ok) { setStatus('送出失敗：window.opener 不存在（請從考試頁開啟本頁）。', true); return; }
+  appendFinalLine(text, true);
+  inp.select();
 }
 
 function onRecError(ev) {
@@ -489,7 +522,9 @@ function startTalk() {
   listening = true;
   document.getElementById('pttBtn').classList.add('listening');
   document.getElementById('pttBtn').textContent = '● 聽取中…（放開結束）';
-  document.getElementById('interimLine').textContent = '';
+  var inp = document.getElementById('cmdInput');
+  inp.value = '';
+  inp.readOnly = true;    // 辨識期間唯讀：interim 流會覆寫，不讓打字互搶
   setStatus('');
   recognizer = newRecognizer();   // 每次按下都用全新實例，避免殘留狀態
   try {
@@ -505,24 +540,24 @@ function stopTalk() {
   listening = false;
   document.getElementById('pttBtn').classList.remove('listening');
   document.getElementById('pttBtn').textContent = '🎙 按住說話';
+  document.getElementById('cmdInput').readOnly = false;
   if (recognizer) {
     try { recognizer.stop(); } catch (e) { /* 已停就算了 */ }
     // 不清 recognizer：stop 後 onresult 還會補送最後的 final 結果
   }
 }
 
-/* ── 字幕區 ───────────────────────────────── */
-function appendFinalLine(text) {
+/* ── 字幕歷史區（typed=true 時加 ⌨ 標記，僅本頁顯示用，不進協定）── */
+function appendFinalLine(text, typed) {
   var host = document.getElementById('finalLines');
   var div = document.createElement('div');
   div.className = 'line';
   var t = new Date();
   var hh = ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2) + ':' + ('0' + t.getSeconds()).slice(-2);
-  div.innerHTML = '<span class="t">' + hh + '</span>';
+  div.innerHTML = '<span class="t">' + hh + (typed ? ' ⌨' : '') + '</span>';
   div.appendChild(document.createTextNode(text));
   host.appendChild(div);
   host.scrollTop = host.scrollHeight;
-  document.getElementById('interimLine').textContent = '';
 }
 
 /* ── 事件繫結 ─────────────────────────────── */
@@ -554,9 +589,13 @@ window.addEventListener('DOMContentLoaded', function () {
     if (ok) { appendFinalLine('（測試訊息已回送）'); setStatus('測試訊息已 postMessage 給考試頁，請在考試頁 Console 確認收到。'); }
     else setStatus('回送失敗：window.opener 不存在（請從考試頁開啟本頁）。', true);
   });
+  document.getElementById('btnSendCmd').addEventListener('click', sendTyped);
+  document.getElementById('cmdInput').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') { ev.preventDefault(); sendTyped(); }
+  });
   document.getElementById('btnClear').addEventListener('click', function () {
     document.getElementById('finalLines').innerHTML = '';
-    document.getElementById('interimLine').textContent = '';
+    document.getElementById('cmdInput').value = '';
     document.getElementById('fbLines').innerHTML = '<div class="fb-none">尚未收到考試頁回饋——說一句口令試試。</div>';
     fbCount = 0;
   });
