@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>語音擺位橋接頁（B0 PoC）</title>
+<style>
+  /* 深色主題：色票對齊主專案 Stylesheet.html（--brand-blue/--bg/#7ec8f7），
+     但本頁部署在 GAS 之外（GitHub Pages），刻意不引入該檔、自帶一份。 */
+  :root {
+    --brand-blue: #2980b9;
+    --brand-blue-dark: #1a5276;
+    --bg: #1a2535;
+    --bg2: #1e2d42;
+    --bg3: #243044;
+    --card-bg: rgba(255,255,255,0.06);
+    --text: rgba(255,255,255,0.90);
+    --text-muted: rgba(255,255,255,0.45);
+    --bright: #7ec8f7;
+    --ok: #2ecc71;
+    --warn: #e8c24a;
+    --err: #e74c3c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif;
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 16px;
+    -webkit-user-select: none; user-select: none;
+  }
+  h1 { font-size: 18px; color: var(--bright); margin-bottom: 4px; }
+  .sub { font-size: 12px; color: var(--text-muted); margin-bottom: 14px; }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 10px;
+    padding: 12px;
+    margin-bottom: 12px;
+  }
+  .card h2 {
+    font-size: 14px; color: var(--bright);
+    margin-bottom: 8px; font-weight: bold;
+  }
+  /* ── 設備自檢 ─────────────────────────────── */
+  .chk-row { display: flex; align-items: flex-start; gap: 8px; padding: 4px 0; font-size: 13px; }
+  .chk-mark { width: 20px; text-align: center; flex: none; font-weight: bold; }
+  .chk-mark.ok   { color: var(--ok); }
+  .chk-mark.warn { color: var(--warn); }
+  .chk-mark.fail { color: var(--err); }
+  .chk-mark.pend { color: var(--text-muted); }
+  .chk-label { flex: none; width: 92px; color: var(--text-muted); }
+  .chk-detail { flex: 1; word-break: break-all; }
+  /* ── 按鈕 ─────────────────────────────────── */
+  button {
+    background: var(--bg3);
+    color: var(--text);
+    border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 8px;
+    padding: 7px 14px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  button:hover { background: var(--brand-blue-dark); }
+  button:disabled { opacity: 0.4; cursor: default; }
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  /* ── push-to-talk ────────────────────────── */
+  #pttBtn {
+    display: block;
+    width: 100%;
+    padding: 22px 0;
+    font-size: 18px;
+    font-weight: bold;
+    border-radius: 12px;
+    background: var(--brand-blue);
+    border: 1px solid rgba(255,255,255,0.25);
+    color: #fff;
+    touch-action: none;          /* 防止長按觸發捲動/右鍵選單 */
+  }
+  #pttBtn.listening {
+    background: var(--err);
+    box-shadow: 0 0 0 4px rgba(231,76,60,0.35);
+  }
+  #pttBtn:disabled { background: var(--bg3); color: var(--text-muted); box-shadow: none; }
+  #engineBadge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--bg3);
+    color: var(--text-muted);
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  #engineBadge.ondevice { color: var(--ok); border: 1px solid var(--ok); }
+  #engineBadge.cloud    { color: var(--warn); border: 1px solid var(--warn); }
+  #engineBadge.none     { color: var(--err); border: 1px solid var(--err); }
+  /* ── 字幕 ─────────────────────────────────── */
+  #finalLines {
+    min-height: 72px; max-height: 180px; overflow-y: auto;
+    font-size: 15px; line-height: 1.6;
+  }
+  #finalLines .line { border-bottom: 1px dashed rgba(255,255,255,0.10); padding: 2px 0; }
+  #finalLines .line .t { color: var(--text-muted); font-size: 11px; margin-right: 6px; }
+  #interimLine { min-height: 24px; font-size: 15px; color: var(--bright); font-style: italic; }
+  #statusLine { font-size: 12px; color: var(--text-muted); margin-top: 6px; min-height: 16px; }
+  #statusLine.err { color: var(--err); }
+  #sendStat { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+</style>
+</head>
+<body>
+  <h1>語音擺位橋接頁 <span id="engineBadge">偵測中…</span></h1>
+  <div class="sub">B0 PoC — 本頁為 top-level 靜態頁（GAS 之外），負責收音並將逐字稿回送考試頁。</div>
+
+  <!-- ── 設備自檢 ─────────────────────────── -->
+  <div class="card">
+    <h2>考前設備自檢</h2>
+    <div id="checks"></div>
+    <div class="btn-row">
+      <button id="btnRecheck">重新檢查</button>
+      <button id="btnMicTest">麥克風自檢（getUserMedia）</button>
+      <button id="btnInstall" style="display:none">下載 zh-TW 語言包</button>
+    </div>
+  </div>
+
+  <!-- ── push-to-talk ─────────────────────── -->
+  <div class="card">
+    <h2>按住說話</h2>
+    <button id="pttBtn" disabled>偵測辨識引擎中…</button>
+    <div id="statusLine"></div>
+  </div>
+
+  <!-- ── 即時字幕 ─────────────────────────── -->
+  <div class="card">
+    <h2>即時字幕</h2>
+    <div id="interimLine"></div>
+    <div id="finalLines"></div>
+    <div id="sendStat">已回送 0 則</div>
+    <div class="btn-row">
+      <button id="btnPing">測試回送（假逐字稿）</button>
+      <button id="btnClear">清空字幕</button>
+    </div>
+  </div>
+
+<script>
+'use strict';
+/* ============================================================
+ * 語音擺位橋接頁（B0 PoC）
+ * - 收音必須在 top-level document：GAS 頁（含 ?page=xxx 彈窗）內的
+ *   使用者程式碼永遠被包在 *.googleusercontent.com 巢狀 sandbox iframe，
+ *   Permissions-Policy 擋死 microphone，故本頁部署於 GitHub Pages。
+ * - 逐字稿協定（帶版本欄 v）：
+ *     { type:'voice:transcript', v:1, text, final:true|false, ts }
+ * - 辨識三層：on-device Web Speech（Chrome 139+，zh-TW，processLocally）
+ *   → 雲端 webkitSpeechRecognition（cmn-Hant-TW）→ 無語音（明示原因）。
+ * ============================================================ */
+
+var PROTO_V = 1;
+
+/* ── opener 綁定：開頁時擷取一次，之後不重抓（防中途被換掉多播） ── */
+var boundOpener = window.opener || null;
+// opener 的 origin 是動態的 n-xxxx-script.googleusercontent.com，無法預先寫死；
+// 若 referrer 有帶 origin 就鎖定它，否則退回 '*'（接收端 B2 會再驗 origin）。
+var openerOrigin = '*';
+try {
+  if (document.referrer) openerOrigin = new URL(document.referrer).origin;
+} catch (e) { /* 保持 '*' */ }
+
+var sentCount = 0;
+function sendToOpener(text, isFinal) {
+  if (!boundOpener) return false;
+  try {
+    boundOpener.postMessage(
+      { type: 'voice:transcript', v: PROTO_V, text: String(text), final: !!isFinal, ts: Date.now() },
+      openerOrigin
+    );
+    sentCount++;
+    document.getElementById('sendStat').textContent =
+      '已回送 ' + sentCount + ' 則（targetOrigin=' + openerOrigin + '）';
+    return true;
+  } catch (e) {
+    setStatus('回送失敗：' + e.message, true);
+    return false;
+  }
+}
+
+/* ── 狀態列 ───────────────────────────────── */
+function setStatus(msg, isErr) {
+  var el = document.getElementById('statusLine');
+  el.textContent = msg || '';
+  el.className = isErr ? 'err' : '';
+}
+
+/* ── 設備自檢 ─────────────────────────────── */
+var CHECK_DEFS = [
+  { id: 'chrome', label: 'Chrome 版本' },
+  { id: 'opener', label: '考試頁連線' },
+  { id: 'mic',    label: '麥克風權限' },
+  { id: 'pack',   label: 'zh-TW 語言包' }
+];
+var MARKS = { ok: '✓', warn: '△', fail: '✗', pend: '…' };
+function renderCheckRows() {
+  var host = document.getElementById('checks');
+  host.innerHTML = '';
+  CHECK_DEFS.forEach(function (d) {
+    var row = document.createElement('div');
+    row.className = 'chk-row';
+    row.innerHTML =
+      '<span class="chk-mark pend" id="mark-' + d.id + '">…</span>' +
+      '<span class="chk-label">' + d.label + '</span>' +
+      '<span class="chk-detail" id="detail-' + d.id + '">檢查中…</span>';
+    host.appendChild(row);
+  });
+}
+function setCheck(id, state, detail) {
+  var m = document.getElementById('mark-' + id);
+  m.textContent = MARKS[state];
+  m.className = 'chk-mark ' + state;
+  document.getElementById('detail-' + id).textContent = detail;
+}
+
+/* Chrome 版本（userAgent 解析；139+ 才有 on-device Web Speech zh-TW） */
+function checkChrome() {
+  var m = navigator.userAgent.match(/Chrom(?:e|ium)\/(\d+)/);
+  var isEdge = /Edg\//.test(navigator.userAgent);
+  if (!m) { setCheck('chrome', 'fail', '非 Chrome/Chromium 瀏覽器，語音功能不支援'); return null; }
+  var ver = parseInt(m[1], 10);
+  if (isEdge) { setCheck('chrome', 'warn', 'Edge ' + ver + '：語音走 Azure 且受 GPO 開關管制，不在支援矩陣'); return ver; }
+  if (ver >= 139) setCheck('chrome', 'ok', 'Chrome ' + ver + '（≥139，支援 on-device 辨識）');
+  else setCheck('chrome', 'warn', 'Chrome ' + ver + '（<139，無 on-device，只能雲端辨識）');
+  return ver;
+}
+
+/* 考試頁連線（window.opener 是否存在；COOP 若被切斷會是 null） */
+function checkOpener() {
+  if (boundOpener) {
+    setCheck('opener', 'ok', 'window.opener 存在' +
+      (openerOrigin !== '*' ? '（referrer origin：' + openerOrigin + '）' : '（referrer 無 origin，回送用 targetOrigin=*）'));
+  } else {
+    setCheck('opener', 'fail',
+      'window.opener 為 null——請從考試頁用按鈕開啟本頁，勿直接輸入網址（若確定是從考試頁開的，可能是 COOP 被切斷，回報開發者）');
+  }
+}
+
+/* 麥克風權限（permissions.query；能監聽 onchange 即時更新） */
+function checkMicPermission() {
+  if (!navigator.permissions || !navigator.permissions.query) {
+    setCheck('mic', 'warn', '瀏覽器不支援 permissions.query，請按「麥克風自檢」實測');
+    return;
+  }
+  navigator.permissions.query({ name: 'microphone' }).then(function (st) {
+    applyMicState(st.state);
+    st.onchange = function () { applyMicState(st.state); };
+  }).catch(function () {
+    setCheck('mic', 'warn', '無法查詢，請按「麥克風自檢」實測');
+  });
+}
+function applyMicState(state) {
+  if (state === 'granted') setCheck('mic', 'ok', '已授權');
+  else if (state === 'prompt') setCheck('mic', 'warn', '尚未授權——第一次按住說話（或按「麥克風自檢」）時會跳出詢問，請按「允許」');
+  else setCheck('mic', 'fail', '已封鎖——請點網址列左側鎖頭圖示 → 麥克風 → 允許，然後重新整理');
+}
+
+/* 麥克風自檢：getUserMedia 實測（B0 驗證清單第 2 條） */
+function micTest() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    setCheck('mic', 'fail', '此環境無 getUserMedia（需 HTTPS top-level 頁）');
+    return;
+  }
+  setCheck('mic', 'pend', 'getUserMedia 測試中…');
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+    stream.getTracks().forEach(function (t) { t.stop(); });   // 立即釋放，只驗證能拿到
+    setCheck('mic', 'ok', 'getUserMedia 成功（已授權，音軌可取得）');
+  }).catch(function (err) {
+    setCheck('mic', 'fail', 'getUserMedia 失敗：' + err.name + '（' + err.message + '）');
+  });
+}
+
+/* ── 辨識引擎偵測：on-device → 雲端 → 無 ───────────────── */
+var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+var engineMode = 'none';   // 'ondevice' | 'cloud' | 'none'
+
+function setEngineBadge() {
+  var b = document.getElementById('engineBadge');
+  if (engineMode === 'ondevice') { b.textContent = 'on-device 辨識'; b.className = 'ondevice'; }
+  else if (engineMode === 'cloud') { b.textContent = '雲端辨識（降級）'; b.className = 'cloud'; }
+  else { b.textContent = '語音不可用'; b.className = 'none'; }
+  var ptt = document.getElementById('pttBtn');
+  if (engineMode === 'none') {
+    ptt.disabled = true;
+    ptt.textContent = '語音不可用';
+  } else {
+    ptt.disabled = false;
+    ptt.textContent = '🎙 按住說話';
+  }
+}
+
+function detectEngine() {
+  if (!SR) {
+    engineMode = 'none';
+    setEngineBadge();
+    setCheck('pack', 'fail', '瀏覽器無 SpeechRecognition API');
+    setStatus('此瀏覽器不支援 Web Speech API，語音功能無法使用。', true);
+    return;
+  }
+  // 先試 on-device 可用性（Chrome 139+ 才有 available 靜態方法）
+  if (typeof SR.available === 'function') {
+    SR.available({ langs: ['zh-TW'], processLocally: true }).then(function (status) {
+      if (status === 'available') {
+        engineMode = 'ondevice';
+        setCheck('pack', 'ok', '已安裝（離線可辨識）');
+      } else if (status === 'downloadable') {
+        engineMode = 'cloud';   // 語言包下載完成前先用雲端
+        setCheck('pack', 'warn', '可下載但尚未安裝（約 60MB）——請按「下載 zh-TW 語言包」；下載前暫用雲端辨識');
+        document.getElementById('btnInstall').style.display = '';
+      } else if (status === 'downloading') {
+        engineMode = 'cloud';
+        setCheck('pack', 'warn', '下載中——完成後按「重新檢查」；期間暫用雲端辨識');
+      } else {  // 'unavailable'
+        engineMode = 'cloud';
+        setCheck('pack', 'fail', 'on-device 不支援 zh-TW（status=' + status + '），降級雲端辨識');
+      }
+      setEngineBadge();
+    }).catch(function (e) {
+      engineMode = 'cloud';
+      setCheck('pack', 'warn', 'available() 查詢失敗（' + e.message + '），降級雲端辨識');
+      setEngineBadge();
+    });
+  } else {
+    engineMode = 'cloud';
+    setCheck('pack', 'warn', '此版本無 on-device API（需 Chrome 139+），降級雲端辨識（斷網即失效）');
+    setEngineBadge();
+  }
+}
+
+/* 語言包下載（SpeechRecognition.install） */
+function installPack(btn) {
+  btn.disabled = true;
+  btn.textContent = '下載中…（約 60MB）';
+  setCheck('pack', 'pend', '語言包下載中…');
+  SR.install({ langs: ['zh-TW'], processLocally: true }).then(function (ok) {
+    if (ok) {
+      btn.style.display = 'none';
+      detectEngine();           // 重新偵測，成功會切到 on-device
+    } else {
+      btn.disabled = false;
+      btn.textContent = '下載 zh-TW 語言包';
+      setCheck('pack', 'fail', 'install() 回傳失敗——請確認網路後重試');
+    }
+  }).catch(function (e) {
+    btn.disabled = false;
+    btn.textContent = '下載 zh-TW 語言包';
+    setCheck('pack', 'fail', '下載失敗：' + e.message);
+  });
+}
+
+/* ── push-to-talk（按住說話）────────────────────────────
+ * 手勢慣例比照 Positioning3D 手開關：pointerdown 開始、
+ * pointerup / pointercancel / window blur 都算放手——
+ * 少掛 blur 會在切視窗時卡在「聽取中」出不來。 */
+var listening = false;
+var recognizer = null;
+
+function newRecognizer() {
+  var rec = new SR();
+  rec.interimResults = true;
+  rec.continuous = true;          // 按住期間持續收，放開才 stop
+  rec.maxAlternatives = 1;
+  if (engineMode === 'ondevice') {
+    rec.lang = 'zh-TW';
+    try { rec.processLocally = true; } catch (e) { /* 舊版屬性不存在就算了 */ }
+  } else {
+    rec.lang = 'cmn-Hant-TW';     // 雲端辨識的繁中台灣代碼
+  }
+  rec.onresult = onRecResult;
+  rec.onerror = onRecError;
+  rec.onend = function () {
+    // 引擎自行結束（雲端逾時等）也要歸位，不然按鈕狀態卡死
+    if (listening) stopTalk();
+  };
+  return rec;
+}
+
+function onRecResult(ev) {
+  var interim = '';
+  for (var i = ev.resultIndex; i < ev.results.length; i++) {
+    var r = ev.results[i];
+    var text = r[0] ? r[0].transcript : '';
+    if (!text) continue;
+    if (r.isFinal) {
+      appendFinalLine(text);
+      sendToOpener(text, true);
+    } else {
+      interim += text;
+    }
+  }
+  document.getElementById('interimLine').textContent = interim;
+  if (interim) sendToOpener(interim, false);
+}
+
+function onRecError(ev) {
+  var msgMap = {
+    'not-allowed': '麥克風被拒絕——請允許權限後重試',
+    'no-speech': '沒聽到聲音（按住期間請說話）',
+    'audio-capture': '找不到麥克風裝置',
+    'network': '雲端辨識網路失敗（斷網時只有 on-device 可用）',
+    'language-not-supported': '此引擎不支援目前語言',
+    'service-not-allowed': '辨識服務被系統政策封鎖（受管電腦 GPO？）'
+  };
+  setStatus('辨識錯誤：' + (msgMap[ev.error] || ev.error), true);
+  // on-device 路徑掛掉（語言/服務層），自動降一級改試雲端
+  if (engineMode === 'ondevice' &&
+      (ev.error === 'language-not-supported' || ev.error === 'service-not-allowed')) {
+    engineMode = 'cloud';
+    setEngineBadge();
+    setStatus('on-device 失敗，已降級雲端辨識，請再試一次。', true);
+  }
+}
+
+function startTalk() {
+  if (listening || engineMode === 'none') return;
+  listening = true;
+  document.getElementById('pttBtn').classList.add('listening');
+  document.getElementById('pttBtn').textContent = '● 聽取中…（放開結束）';
+  document.getElementById('interimLine').textContent = '';
+  setStatus('');
+  recognizer = newRecognizer();   // 每次按下都用全新實例，避免殘留狀態
+  try {
+    recognizer.start();
+  } catch (e) {
+    setStatus('辨識啟動失敗：' + e.message, true);
+    stopTalk();
+  }
+}
+
+function stopTalk() {
+  if (!listening) return;
+  listening = false;
+  document.getElementById('pttBtn').classList.remove('listening');
+  document.getElementById('pttBtn').textContent = '🎙 按住說話';
+  if (recognizer) {
+    try { recognizer.stop(); } catch (e) { /* 已停就算了 */ }
+    // 不清 recognizer：stop 後 onresult 還會補送最後的 final 結果
+  }
+}
+
+/* ── 字幕區 ───────────────────────────────── */
+function appendFinalLine(text) {
+  var host = document.getElementById('finalLines');
+  var div = document.createElement('div');
+  div.className = 'line';
+  var t = new Date();
+  var hh = ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2) + ':' + ('0' + t.getSeconds()).slice(-2);
+  div.innerHTML = '<span class="t">' + hh + '</span>';
+  div.appendChild(document.createTextNode(text));
+  host.appendChild(div);
+  host.scrollTop = host.scrollHeight;
+  document.getElementById('interimLine').textContent = '';
+}
+
+/* ── 事件繫結 ─────────────────────────────── */
+window.addEventListener('DOMContentLoaded', function () {
+  renderCheckRows();
+  checkChrome();
+  checkOpener();
+  checkMicPermission();
+  detectEngine();
+
+  var ptt = document.getElementById('pttBtn');
+  ptt.addEventListener('pointerdown', function (ev) {
+    ev.preventDefault();
+    startTalk();
+  });
+  // 放手三兄弟（比照手開關：漏掛 blur 會卡住）
+  window.addEventListener('pointerup', stopTalk, true);
+  window.addEventListener('pointercancel', stopTalk, true);
+  window.addEventListener('blur', stopTalk);
+  ptt.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
+
+  document.getElementById('btnRecheck').addEventListener('click', function () {
+    checkChrome(); checkOpener(); checkMicPermission(); detectEngine();
+  });
+  document.getElementById('btnMicTest').addEventListener('click', micTest);
+  document.getElementById('btnInstall').addEventListener('click', function () { installPack(this); });
+  document.getElementById('btnPing').addEventListener('click', function () {
+    var ok = sendToOpener('（測試訊息 ' + new Date().toLocaleTimeString() + '）', true);
+    if (ok) { appendFinalLine('（測試訊息已回送）'); setStatus('測試訊息已 postMessage 給考試頁，請在考試頁 Console 確認收到。'); }
+    else setStatus('回送失敗：window.opener 不存在（請從考試頁開啟本頁）。', true);
+  });
+  document.getElementById('btnClear').addEventListener('click', function () {
+    document.getElementById('finalLines').innerHTML = '';
+    document.getElementById('interimLine').textContent = '';
+  });
+});
+</script>
+</body>
+</html>
