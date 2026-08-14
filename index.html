@@ -141,6 +141,7 @@
       <button id="btnRecheck">重新檢查</button>
       <button id="btnMicTest">麥克風自檢（getUserMedia）</button>
       <button id="btnInstall" style="display:none">下載 zh-TW 語言包</button>
+      <button id="btnVosk">啟用本地離線辨識（首次下載約 41MB）</button>
     </div>
   </div>
 
@@ -190,16 +191,19 @@
  *   打字與語音走完全相同的 voice:transcript 回送鏈，考試頁無感。
  * ============================================================ */
 
-/* ==== VOICE-PROTO-BEGIN（雙端逐字複本，勿單邊改）====
-   橋接頁部署在 GitHub Pages、考試頁部署在 GAS，是兩個互不相干的部署面，沒有共用檔案的可能，
-   所以協定以「兩份逐字相同的常數區塊」共用，由 test/voice_protocol_test.js 擋漂移。
-   BRIDGE_ORIGIN 是 B0 實測到的 e.origin 實值；橋接頁一搬家，這裡與橋接頁要一起改。 */
+/* ==== VOICE-PROTO-BEGIN（三端逐字複本，勿單邊改）====
+   橋接頁部署在 GitHub Pages、考試頁（Index.html）與老師獨立 3D 頁（Positioning3D.html）
+   部署在 GAS，是互不相干的部署面，沒有共用檔案的可能，所以協定以「三份逐字相同的
+   常數區塊」共用，由 test/voice_protocol_test.js 擋漂移。
+   BRIDGE_ORIGIN 是 B0 實測到的 e.origin 實值；橋接頁一搬家，三份要一起改。 */
 var VOICE_PROTO = {
   V: 1,                                                    // 協定版本（不相容變更才 +1；收到不同版本明確拒收並提示）
   BRIDGE_URL: 'https://yeou6120-collab.github.io/voice-bridge/',
   BRIDGE_ORIGIN: 'https://yeou6120-collab.github.io',       // 考試頁驗 e.origin＋回送 targetOrigin 用
-  MSG_TRANSCRIPT: 'voice:transcript',                       // 橋接頁 → 考試頁 { type, v, text, final, ts }
-  MSG_FEEDBACK: 'voice:feedback'                            // 考試頁 → 橋接頁 { type, v, ok, text, detail, ts }
+  MSG_TRANSCRIPT: 'voice:transcript',                       // 橋接頁 → 考試頁 { type, v, text, final, ts, alts? }（alts＝final 的其餘辨識候選，舊端忽略即可）
+  MSG_FEEDBACK: 'voice:feedback',                           // 考試頁 → 橋接頁 { type, v, ok, text, detail, ts }
+  MSG_HELLO: 'voice:hello',                                 // 橋接頁 → 考試頁 { type, v, ts } 心跳：考試頁重整後靠它自動重新採用彈窗（免再開一個）
+  HELLO_MS: 2000                                            // 心跳間隔
 };
 /* ==== VOICE-PROTO-END ==== */
 
@@ -213,13 +217,21 @@ try {
 } catch (e) { /* 保持 '*' */ }
 
 var sentCount = 0;
-function sendToOpener(text, isFinal) {
+// 心跳：每 HELLO_MS 送一則 voice:hello 給 opener。考試頁一旦重整/換頁，voiceWin 參照就沒了，
+// 原本只能再開一個彈窗；有心跳之後考試頁收到就把 e.source 重新採用為彈窗參照，自動接回來。
+// opener 是「那個分頁」的 WindowProxy，分頁內重新導覽不會換掉它，所以接得回去。
+setInterval(function () {
+  if (!boundOpener) return;
+  try { boundOpener.postMessage({ type: VOICE_PROTO.MSG_HELLO, v: VOICE_PROTO.V, ts: Date.now() }, openerOrigin); } catch (e) {}
+}, VOICE_PROTO.HELLO_MS);
+function sendToOpener(text, isFinal, alts) {
   if (!boundOpener) return false;
   try {
-    boundOpener.postMessage(
-      { type: VOICE_PROTO.MSG_TRANSCRIPT, v: VOICE_PROTO.V, text: String(text), final: !!isFinal, ts: Date.now() },
-      openerOrigin
-    );
+    var msg = { type: VOICE_PROTO.MSG_TRANSCRIPT, v: VOICE_PROTO.V, text: String(text), final: !!isFinal, ts: Date.now() };
+    // final 的其餘辨識候選（第 2~N 名）：接收端第一名解析沒中時逐一改試——
+    // 「外展」誤辨成「外站」時第二名往往才是對的。interim 不帶（引擎只給 final 候選）。
+    if (alts && alts.length) msg.alts = alts;
+    boundOpener.postMessage(msg, openerOrigin);
     sentCount++;
     document.getElementById('sendStat').textContent =
       '已回送 ' + sentCount + ' 則（targetOrigin=' + openerOrigin + '）';
@@ -280,7 +292,8 @@ var CHECK_DEFS = [
   { id: 'chrome', label: 'Chrome 版本' },
   { id: 'opener', label: '考試頁連線' },
   { id: 'mic',    label: '麥克風權限' },
-  { id: 'pack',   label: 'zh-TW 語言包' }
+  { id: 'pack',   label: 'zh-TW 語言包' },
+  { id: 'vosk',   label: '本地離線辨識' }
 ];
 var MARKS = { ok: '✓', warn: '△', fail: '✗', pend: '…' };
 function renderCheckRows() {
@@ -366,11 +379,12 @@ var engineMode = 'none';   // 'ondevice' | 'cloud' | 'none'
 
 function setEngineBadge() {
   var b = document.getElementById('engineBadge');
-  if (engineMode === 'ondevice') { b.textContent = 'on-device 辨識'; b.className = 'ondevice'; }
+  if (voskState === 'ready') { b.textContent = '本地離線辨識（Vosk）'; b.className = 'ondevice'; }
+  else if (engineMode === 'ondevice') { b.textContent = 'on-device 辨識'; b.className = 'ondevice'; }
   else if (engineMode === 'cloud') { b.textContent = '雲端辨識（降級）'; b.className = 'cloud'; }
   else { b.textContent = '語音不可用'; b.className = 'none'; }
   var ptt = document.getElementById('pttBtn');
-  if (engineMode === 'none') {
+  if (voskState !== 'ready' && engineMode === 'none') {
     ptt.disabled = true;
     ptt.textContent = '語音不可用（可改用下方打字輸入）';
   } else {
@@ -438,6 +452,126 @@ function installPack(btn) {
   });
 }
 
+/* ── 本地離線辨識（Vosk WASM）──────────────────────────
+ * 為什麼要第四個引擎：雲端 webkitSpeechRecognition 網路 lag 大、醫放術語辨識差；
+ * Chrome on-device 的 zh-TW 語言包多數機器裝不了。Vosk 在本頁跑 WASM（vosk.js，
+ * worker 內嵌單檔），模型 vosk-model-small-cn-0.22（41MB，首次下載後走瀏覽器快取）
+ * 與本頁同源部署在 GitHub Pages。模型輸出簡體＋空格分詞 → normVosk_ 去空格＋
+ * s2t.js（OpenCC 單字表）轉繁體再回送，解析端拼音容錯層吸收剩餘同音誤辨。
+ * 啟用狀態記 localStorage：下次開頁自動初始化，考前不用再按一次。 */
+var VOSK_MODEL_URL = 'vosk-model-small-cn-0.22.tar.gz';
+var VOSK_LS_KEY = 'bridge_vosk_v1';
+var voskState = 'off';            // 'off' | 'loading' | 'ready' | 'error'
+var voskModel = null, voskRec = null, voskRecRate = 0;
+var voskAudio = null;             // PTT 期間的 { stream, ctx, src, node }
+
+function setVoskBtn() {
+  var btn = document.getElementById('btnVosk');
+  if (voskState === 'ready') btn.textContent = '停用本地離線辨識';
+  else if (voskState === 'loading') { btn.textContent = '模型載入中…'; }
+  else btn.textContent = '啟用本地離線辨識（首次下載約 41MB）';
+  btn.disabled = (voskState === 'loading');
+}
+function voskToggle() {
+  if (voskState === 'ready') {          // 停用：清記憶並釋放，退回原本的引擎鏈
+    try { if (voskModel) voskModel.terminate(); } catch (e) {}
+    voskModel = null; voskRec = null; voskState = 'off';
+    try { localStorage.removeItem(VOSK_LS_KEY); } catch (e) {}
+    setCheck('vosk', 'warn', '已停用——退回 on-device／雲端辨識');
+    setVoskBtn(); setEngineBadge();
+    return;
+  }
+  voskInit();
+}
+function voskInit() {
+  if (voskState === 'loading' || voskState === 'ready') return;
+  voskState = 'loading'; setVoskBtn();
+  setCheck('vosk', 'pend', '載入辨識引擎（vosk.js＋s2t.js）…');
+  loadScript_('s2t.js', function (errA) {
+  loadScript_('vosk.js', function (errB) {
+    if (errA || errB || typeof Vosk === 'undefined' || typeof s2t !== 'function') {
+      voskState = 'error';
+      setCheck('vosk', 'fail', 'vosk.js／s2t.js 載入失敗（部署缺檔？），退回原本引擎');
+      setVoskBtn(); setEngineBadge();
+      return;
+    }
+    setCheck('vosk', 'pend', '模型下載／載入中（首次約 41MB，之後走瀏覽器快取）…');
+    Vosk.createModel(VOSK_MODEL_URL).then(function (model) {
+      voskModel = model; voskState = 'ready';
+      try { localStorage.setItem(VOSK_LS_KEY, '1'); } catch (e) {}
+      setCheck('vosk', 'ok', '已就緒（完全離線、不經任何伺服器）');
+      setVoskBtn(); setEngineBadge();
+    }).catch(function (e) {
+      voskState = 'error';
+      setCheck('vosk', 'fail', '模型載入失敗：' + (e && e.message || e) + '——退回原本引擎');
+      setVoskBtn(); setEngineBadge();
+    });
+  });
+  });
+}
+var loadedScripts_ = {};
+function loadScript_(src, cb) {
+  if (loadedScripts_[src]) { cb(null); return; }
+  var s = document.createElement('script');
+  s.src = src;
+  s.onload = function () { loadedScripts_[src] = true; cb(null); };
+  s.onerror = function () { cb(new Error('load fail: ' + src)); };
+  document.head.appendChild(s);
+}
+/* 模型輸出正規化：去空格分詞＋簡→繁（s2t.js） */
+function normVosk_(s) {
+  var t = String(s || '').replace(/\s+/g, '');
+  return t ? s2t(t) : '';
+}
+function voskAttachRec_(sampleRate) {
+  if (voskRec && voskRecRate === sampleRate) return;
+  if (voskRec) { try { voskRec.remove(); } catch (e) {} }
+  voskRec = new voskModel.KaldiRecognizer(sampleRate);
+  voskRecRate = sampleRate;
+  voskRec.on('partialresult', function (m) {
+    var txt = normVosk_(m.result && m.result.partial);
+    if (!txt) return;
+    document.getElementById('cmdInput').value = txt;
+    sendToOpener(txt, false);
+  });
+  voskRec.on('result', function (m) {
+    var txt = normVosk_(m.result && m.result.text);
+    if (!txt) return;
+    appendFinalLine(txt);
+    sendToOpener(txt, true);
+    document.getElementById('cmdInput').value = txt;
+  });
+}
+function voskStart_() {
+  navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 }
+  }).then(function (stream) {
+    if (!listening) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }   // 授權跳窗期間已放手
+    var ctx = new AudioContext();
+    voskAttachRec_(ctx.sampleRate);
+    var src = ctx.createMediaStreamSource(stream);
+    var node = ctx.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = function (ev) {
+      if (!listening) return;
+      try { voskRec.acceptWaveform(ev.inputBuffer); } catch (e) { /* worker 忙碌丟一幀無妨 */ }
+    };
+    src.connect(node);
+    node.connect(ctx.destination);   // ScriptProcessor 沒接 destination 部分瀏覽器不觸發
+    voskAudio = { stream: stream, ctx: ctx, src: src, node: node };
+  }).catch(function (err) {
+    setStatus('麥克風失敗：' + err.name + '（' + err.message + '）', true);
+    stopTalk();
+  });
+}
+function voskStop_() {
+  if (!voskAudio) return;
+  try { voskAudio.src.disconnect(); voskAudio.node.disconnect(); } catch (e) {}
+  try { voskAudio.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+  try { voskAudio.ctx.close(); } catch (e) {}
+  voskAudio = null;
+  if (voskRec) { try { voskRec.retrieveFinalResult(); } catch (e) {} }   // 逼出最後 final（result 事件回送）
+}
+
 /* ── push-to-talk（按住說話）────────────────────────────
  * 手勢慣例比照 Positioning3D 手開關：pointerdown 開始、
  * pointerup / pointercancel / window blur 都算放手——
@@ -449,7 +583,7 @@ function newRecognizer() {
   var rec = new SR();
   rec.interimResults = true;
   rec.continuous = true;          // 按住期間持續收，放開才 stop
-  rec.maxAlternatives = 1;
+  rec.maxAlternatives = 5;   // 醫放術語常被誤辨成同音日常詞，多要幾個候選給解析層改試
   if (engineMode === 'ondevice') {
     rec.lang = 'zh-TW';
     try { rec.processLocally = true; } catch (e) { /* 舊版屬性不存在就算了 */ }
@@ -473,8 +607,13 @@ function onRecResult(ev) {
     var text = r[0] ? r[0].transcript : '';
     if (!text) continue;
     if (r.isFinal) {
+      var alts = [];
+      for (var a = 1; a < r.length; a++) {
+        var alt = r[a] && r[a].transcript ? String(r[a].transcript).trim() : '';
+        if (alt && alt !== text) alts.push(alt);
+      }
       appendFinalLine(text);
-      sendToOpener(text, true);
+      sendToOpener(text, true, alts);
       inp.value = text;   // final 留在輸入框：辨識錯了放開後可直接改字 Enter 重送
     } else {
       interim += text;
@@ -518,7 +657,8 @@ function onRecError(ev) {
 }
 
 function startTalk() {
-  if (listening || engineMode === 'none') return;
+  if (listening) return;
+  if (voskState !== 'ready' && engineMode === 'none') return;
   listening = true;
   document.getElementById('pttBtn').classList.add('listening');
   document.getElementById('pttBtn').textContent = '● 聽取中…（放開結束）';
@@ -526,6 +666,7 @@ function startTalk() {
   inp.value = '';
   inp.readOnly = true;    // 辨識期間唯讀：interim 流會覆寫，不讓打字互搶
   setStatus('');
+  if (voskState === 'ready') { voskStart_(); return; }   // 本地離線優先，不碰 Web Speech
   recognizer = newRecognizer();   // 每次按下都用全新實例，避免殘留狀態
   try {
     recognizer.start();
@@ -541,6 +682,7 @@ function stopTalk() {
   document.getElementById('pttBtn').classList.remove('listening');
   document.getElementById('pttBtn').textContent = '🎙 按住說話';
   document.getElementById('cmdInput').readOnly = false;
+  voskStop_();   // 本地離線路徑的收尾（沒在用時是 no-op）
   if (recognizer) {
     try { recognizer.stop(); } catch (e) { /* 已停就算了 */ }
     // 不清 recognizer：stop 後 onresult 還會補送最後的 final 結果
@@ -567,6 +709,13 @@ window.addEventListener('DOMContentLoaded', function () {
   checkOpener();
   checkMicPermission();
   detectEngine();
+  // 本地離線辨識：上次啟用過就自動載入（模型走瀏覽器快取，不用重新下載）
+  setVoskBtn();
+  var voskOn = false;
+  try { voskOn = localStorage.getItem(VOSK_LS_KEY) === '1'; } catch (e) {}
+  if (voskOn) voskInit();
+  else setCheck('vosk', 'warn', '未啟用——啟用後完全離線辨識，免網路、術語同音誤辨由考試頁拼音層吸收');
+  document.getElementById('btnVosk').addEventListener('click', voskToggle);
 
   var ptt = document.getElementById('pttBtn');
   ptt.addEventListener('pointerdown', function (ev) {
