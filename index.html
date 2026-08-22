@@ -369,8 +369,35 @@ function micTest() {
     stream.getTracks().forEach(function (t) { t.stop(); });   // 立即釋放，只驗證能拿到
     setCheck('mic', 'ok', 'getUserMedia 成功（已授權，音軌可取得）');
   }).catch(function (err) {
-    setCheck('mic', 'fail', 'getUserMedia 失敗：' + err.name + '（' + err.message + '）');
+    setCheck('mic', 'fail', micErrHint_(err));
   });
+}
+/**
+ * 把 getUserMedia 的錯誤翻成「該去點哪裡」。
+ * 考場上看到 `NotAllowedError` 沒人知道要做什麼，而且這個名字底下其實有兩種完全不同的
+ * 情況：**作業系統擋的**（訊息含 "system"，要去 Windows 設定）與**瀏覽器/使用者拒絕的**
+ * （點網址列鎖頭）。兩者的解法不同，混在一起講等於沒講。
+ */
+function micErrHint_(err) {
+  var name = (err && err.name) || 'Error';
+  var msg = String((err && err.message) || '');
+  var tail = '　［' + name + '：' + msg + '］';
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    if (/system/i.test(msg)) {
+      return '被**作業系統**擋住 → Windows 設定 → 隱私權與安全性 → 麥克風，'
+           + '開啟「讓應用程式存取您的麥克風」**與**「讓桌面應用程式存取您的麥克風」'
+           + '（後者常被漏掉，瀏覽器算桌面應用程式），然後重新整理本頁。' + tail;
+    }
+    return '被**瀏覽器或使用者**拒絕 → 點網址列左邊的鎖頭圖示 → 麥克風 → 允許，'
+         + '然後重新整理本頁。（若曾按過「封鎖」，要在這裡改回來。）' + tail;
+  }
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+    return '找不到麥克風裝置 → 確認麥克風有插上、且在 Windows 音效設定裡沒有被停用。' + tail;
+  }
+  if (name === 'NotReadableError' || name === 'TrackStartError') {
+    return '麥克風被其他程式占用 → 關掉會議軟體／錄音程式後再試。' + tail;
+  }
+  return 'getUserMedia 失敗：' + name + '（' + msg + '）';
 }
 
 /* ── 辨識引擎偵測：on-device → 雲端 → 無 ───────────────── */
