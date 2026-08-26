@@ -492,6 +492,9 @@ var VOSK_TIMEOUT_MS = 120000;     // 看門狗：createModel 多半不會 reject
 var voskState = 'off';            // 'off' | 'loading' | 'ready' | 'error'
 var voskModel = null, voskRec = null, voskRecRate = 0;
 var voskAudio = null;             // PTT 期間的 { stream, ctx, src, node }
+var VOSK_RATE = 16000;            // 模型的取樣率：context 直接開這個，省掉 3 倍重取樣
+var VOSK_PARTIAL_MS = 250;        // 暫定結果節流（每個音框都送＝3D 反覆套暫定姿勢）
+var voskPartialAt_ = 0, voskReleaseAt_ = 0, voskAudioSec_ = 0;
 
 function setVoskBtn() {
   var btn = document.getElementById('btnVosk');
@@ -628,11 +631,25 @@ function voskAttachRec_(sampleRate) {
     var txt = normVosk_(m.result && m.result.partial);
     if (!txt) return;
     document.getElementById('cmdInput').value = txt;
+    // 暫定結果**節流**：每個音框都回送的話，3D 端會為同一句話反覆套用暫定姿勢
+    // （每次都走補間），看起來就是「愈講愈頓」。250ms 一次已足夠給人「有在聽」的回饋。
+    var now = Date.now();
+    if (now - voskPartialAt_ < VOSK_PARTIAL_MS) return;
+    voskPartialAt_ = now;
     sendToOpener(txt, false);
   });
   voskRec.on('result', function (m) {
     var txt = normVosk_(m.result && m.result.text);
     if (!txt) return;
+    // 放開按鈕 → 拿到 final 的實際毫秒數。把「感覺很 lag」變成可比較的數字
+    // （辨識時間 vs 語音長度＝即時率 RTF，>1 表示比講話還慢，那才是真的追不上）
+    if (voskReleaseAt_) {
+      var ms = Date.now() - voskReleaseAt_;
+      var rtf = voskAudioSec_ > 0 ? (ms / 1000 / voskAudioSec_) : 0;
+      setStatus('辨識完成：放開後 ' + ms + 'ms（語音 ' + voskAudioSec_.toFixed(1) + 's、'
+        + voskRecRate + 'Hz、即時率 ' + rtf.toFixed(2) + '）');
+      voskReleaseAt_ = 0;
+    }
     appendFinalLine(txt);
     sendToOpener(txt, true);
     document.getElementById('cmdInput').value = txt;
@@ -643,12 +660,22 @@ function voskStart_() {
     audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 }
   }).then(function (stream) {
     if (!listening) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }   // 授權跳窗期間已放手
-    var ctx = new AudioContext();
+    // ⚠ 取樣率：模型是 **16kHz** 的，而 `new AudioContext()` 在多數機器上是 48kHz
+    //   ⇒ 每一幀送進 worker 的樣本數是需要的 3 倍，Vosk 得先自己重取樣再算特徵，
+    //   等於白花 3 倍的 CPU（這是「會 lag」最直接的一項）。直接開 16kHz 的 context，
+    //   讓瀏覽器用原生程式碼做重取樣。舊瀏覽器不支援 sampleRate 選項就退回預設值。
+    var ctx;
+    try { ctx = new AudioContext({ sampleRate: VOSK_RATE }); } catch (e) { ctx = new AudioContext(); }
+    if (ctx.sampleRate !== VOSK_RATE) { try { ctx.close(); } catch (e2) {} try { ctx = new AudioContext(); } catch (e3) {} }
     voskAttachRec_(ctx.sampleRate);
     var src = ctx.createMediaStreamSource(stream);
-    var node = ctx.createScriptProcessor(4096, 1, 1);
+    // 緩衝：16kHz 下 2048 樣本＝128ms（48kHz 的 4096 是 85ms）。太大＝暫定結果變遲鈍、
+    // 太小＝主執行緒事件過密（ScriptProcessor 跑在主執行緒上）。
+    var node = ctx.createScriptProcessor(2048, 1, 1);
+    voskAudioSec_ = 0;
     node.onaudioprocess = function (ev) {
       if (!listening) return;
+      voskAudioSec_ += ev.inputBuffer.duration;
       try { voskRec.acceptWaveform(ev.inputBuffer); } catch (e) { /* worker 忙碌丟一幀無妨 */ }
     };
     src.connect(node);
@@ -661,6 +688,7 @@ function voskStart_() {
 }
 function voskStop_() {
   if (!voskAudio) return;
+  voskReleaseAt_ = Date.now();   // 放開按鈕的時刻——量「還要等多久才出 final」
   try { voskAudio.src.disconnect(); voskAudio.node.disconnect(); } catch (e) {}
   try { voskAudio.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
   try { voskAudio.ctx.close(); } catch (e) {}
