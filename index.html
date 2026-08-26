@@ -326,6 +326,44 @@ function setCheck(id, state, detail) {
   document.getElementById('detail-' + id).textContent = detail;
 }
 
+/* 「重新檢查」＝**六列全部**重跑一次。
+ * ⚠ 舊版只跑前四列（chrome／opener／mic／pack），Vosk 與 Whisper 那兩列維持舊字，
+ *   而前四列在正常機器上重跑後字句完全一樣 ⇒ 按下去畫面**一格都不動**，
+ *   使用者合理地回報「這顆鈕沒作用」。真正的問題不是沒跑，是**跑了看不出來**。
+ * 兩個本地引擎不重新載入（那要幾十 MB），只把「目前狀態」重新寫一次；
+ * 最後蓋上時戳，讓每一次點擊都有肉眼可見的變化。 */
+function recheckAll() {
+  var btn = document.getElementById('btnRecheck');
+  btn.disabled = true; btn.textContent = '檢查中…';
+  ['chrome', 'opener', 'mic', 'pack'].forEach(function (id) { setCheck(id, 'pend', '檢查中…'); });
+  setTimeout(function () {   // 讓「檢查中…」真的畫得出來（同步跑完會看不到）
+    checkChrome(); checkOpener(); checkMicPermission(); detectEngine();
+    recheckEngineRows_();
+    setWhisperBtn(); setVoskBtn(); setEngineBadge();
+    var t = new Date();
+    setStatus('已於 ' + ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2)
+      + ':' + ('0' + t.getSeconds()).slice(-2) + ' 重新檢查全部項目');
+    btn.disabled = false; btn.textContent = '重新檢查';
+  }, 60);
+}
+/* 兩個本地引擎的列：只回報現況，不重新下載（要重載請用各自的啟用/停用鈕） */
+function recheckEngineRows_() {
+  var VS = {
+    ready: ['ok', '已就緒（完全離線、不經任何伺服器）'],
+    loading: ['pend', '模型載入中…（首次約 41MB）'],
+    error: ['fail', '上次載入失敗——按「啟用本地離線辨識」重試'],
+    off: ['warn', '未啟用——啟用後完全離線辨識，免網路']
+  }[voskState] || ['warn', '未啟用'];
+  setCheck('vosk', VS[0], VS[1]);
+  var WS = {
+    ready: ['ok', '已就緒（' + whisperShort_() + '／' + whisperDev + '）'],
+    loading: ['pend', '模型載入中…'],
+    error: ['fail', '上次載入失敗——按「啟用本地 Whisper 辨識」重試'],
+    off: ['warn', '未啟用——辨識率明顯優於 Vosk（放開按鈕才批次辨識）']
+  }[whisperState] || ['warn', '未啟用'];
+  setCheck('whisper', WS[0], WS[1]);
+}
+
 /* Chrome 版本（userAgent 解析；139+ 才有 on-device Web Speech zh-TW） */
 function checkChrome() {
   var m = navigator.userAgent.match(/Chrom(?:e|ium)\/(\d+)/);
@@ -1070,9 +1108,7 @@ window.addEventListener('DOMContentLoaded', function () {
   window.addEventListener('blur', stopTalk);
   ptt.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });
 
-  document.getElementById('btnRecheck').addEventListener('click', function () {
-    checkChrome(); checkOpener(); checkMicPermission(); detectEngine();
-  });
+  document.getElementById('btnRecheck').addEventListener('click', recheckAll);
   document.getElementById('btnMicTest').addEventListener('click', micTest);
   document.getElementById('btnInstall').addEventListener('click', function () { installPack(this); });
   document.getElementById('btnPing').addEventListener('click', function () {
