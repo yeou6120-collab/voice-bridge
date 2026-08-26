@@ -557,10 +557,16 @@ function setWhisperBtn() {
   else btn.textContent = '啟用本地 Whisper 辨識';
   btn.disabled = (whisperState === 'loading');
 }
+/** 放掉 Whisper 的權重與 GPU 緩衝（dispose 有就用；沒有至少斷參照讓 GC 收） */
+function whisperDispose_() {
+  try { if (whisperPipe && whisperPipe.dispose) whisperPipe.dispose(); } catch (e) {}
+  try { if (whisperPipe && whisperPipe.model && whisperPipe.model.dispose) whisperPipe.model.dispose(); } catch (e) {}
+  whisperPipe = null; whisperState = 'off';
+  try { localStorage.removeItem(WHISPER_LS_KEY); } catch (e) {}
+}
 function whisperToggle() {
   if (whisperState === 'ready') {
-    whisperPipe = null; whisperState = 'off';
-    try { localStorage.removeItem(WHISPER_LS_KEY); } catch (e) {}
+    whisperDispose_();
     setCheck('whisper', 'warn', '已停用——退回 Vosk／on-device／雲端');
     setWhisperBtn(); setEngineBadge();
     return;
@@ -570,6 +576,16 @@ function whisperToggle() {
 function whisperInit() {
   if (whisperState === 'loading' || whisperState === 'ready') return;
   var model = whisperModelId_();
+  // ⚠ 兩個本地引擎**互斥**：Vosk 的模型（42MB）＋它的 worker 與 Whisper 的權重（上百 MB）
+  //   同時掛在同一個分頁裡，是「Array buffer allocation failed」最常見的來源。
+  //   啟用一個就把另一個放掉（使用者要換回去按那顆鈕即可）。
+  if (voskState === 'ready' || voskState === 'loading') {
+    try { if (voskModel) voskModel.terminate(); } catch (e) {}
+    voskModel = null; voskRec = null; voskState = 'off';
+    try { localStorage.removeItem(VOSK_LS_KEY); } catch (e) {}
+    setCheck('vosk', 'warn', '已自動停用以釋放記憶體（Whisper 啟用中；要換回來按「啟用本地離線辨識」）');
+    setVoskBtn();
+  }
   whisperState = 'loading'; setWhisperBtn();
   setCheck('whisper', 'pend', '檢查模型來源（huggingface.co）…');
   // 探針：模型檔在執行期才抓，連不到的話 pipeline 會丟一個看不懂的錯 ⇒ 先問一次 config.json
@@ -692,7 +708,26 @@ function whisperStop_() {
       document.getElementById('cmdInput').value = txt;
     })
     .catch(function (e) {
-      setStatus('Whisper 辨識失敗：' + (e && e.message || e), true);
+      var msg = (e && e.message) || String(e);
+      // 「Array buffer allocation failed」＝記憶體不夠（分頁的 JS heap／wasm 記憶體）。
+      // 自動降一級再試：WebGPU→wasm、base→tiny；已經是最小組合才放棄並講清楚。
+      if (/alloc|out of memory|oom/i.test(msg)) {
+        var sel = document.getElementById('whisperModel');
+        var cur = whisperModelId_();
+        whisperDispose_(); setWhisperBtn(); setEngineBadge();
+        if (cur !== 'Xenova/whisper-tiny') {
+          sel.value = 'Xenova/whisper-tiny';
+          setStatus('記憶體不足（' + msg + '）——自動改用最小的 tiny 模型重新載入，請稍候再試一次', true);
+          setCheck('whisper', 'pend', '記憶體不足 → 改載入 tiny…');
+          whisperInit();
+        } else {
+          setStatus('記憶體不足（' + msg + '）——連 tiny 都配置不到記憶體。'
+            + '請關掉其他分頁／重開瀏覽器再試，或退回 Vosk（按「啟用本地離線辨識」）', true);
+          setCheck('whisper', 'fail', '記憶體不足，已停用——建議退回 Vosk 或雲端辨識');
+        }
+        return;
+      }
+      setStatus('Whisper 辨識失敗：' + msg, true);
     });
 }
 /** 辨識參數（暖機與正式辨識共用同一組，否則暖機編出來的圖不是這一組）。
@@ -750,6 +785,11 @@ function voskToggle() {
 }
 function voskInit() {
   if (voskState === 'loading' || voskState === 'ready') return;
+  if (whisperState === 'ready' || whisperState === 'loading') {   // 互斥，理由同 whisperInit
+    whisperDispose_();
+    setCheck('whisper', 'warn', '已自動停用以釋放記憶體（Vosk 啟用中）');
+    setWhisperBtn();
+  }
   voskState = 'loading'; setVoskBtn();
   setCheck('vosk', 'pend', '載入辨識引擎（vosk.js＋s2t.js）…');
   loadScript_('s2t.js', function (errA) {
