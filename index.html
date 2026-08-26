@@ -738,7 +738,10 @@ function whisperStop_() {
  *  （幻覺），而每多一個 token 就多跑一次自迴歸解碼 ⇒ 又慢又錯。
  *  language 寫死中文＝跳過語言偵測那一趟。 */
 function whisperOpts_() {
-  return { language: 'chinese', task: 'transcribe', chunk_length_s: 30,
+  // ⚠ **不要**傳 chunk_length_s：它是「長音檔分段處理」的開關，一旦有值，
+  //   transformers.js 走的是 chunked 長音路徑（切窗、重疊、逐窗解碼再拼接），
+  //   對一句 2 秒的口令是白做好幾倍的工。口令一定短於 30 秒 ⇒ 走單次推論就好。
+  return { language: 'chinese', task: 'transcribe',
            return_timestamps: false, max_new_tokens: 32, num_beams: 1, do_sample: false };
 }
 /** 線性重取樣到 16kHz（只在 AudioContext 拿不到 16k 時才會用到） */
