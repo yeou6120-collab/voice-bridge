@@ -105,6 +105,7 @@
   }
   #finalLines .line { border-bottom: 1px dashed rgba(255,255,255,0.10); padding: 2px 0; }
   #finalLines .line .t { color: var(--text-muted); font-size: 11px; margin-right: 6px; }
+  #finalLines .line .meta { color: #7ec8f7; font-size: 11px; }   /* 辨識耗時／即時率 */
   /* 口令輸入框＝辨識字幕＋打字輸入合一：按住說話時唯讀（辨識驅動），平時可打字 Enter 送出；
      送出後保留原句供「誤辨改字重送」。body 的 user-select:none 會擋輸入框選字，這裡要解回來。 */
   #cmdInput {
@@ -637,7 +638,8 @@ function whisperStop_() {
       setStatus('辨識完成：放開後 ' + ms + 'ms（語音 ' + whisperAudioSec_.toFixed(1) + 's、'
         + whisperDev + '、即時率 ' + rtf.toFixed(2) + '）' + (txt ? '' : '——沒有聽到內容'));
       if (!txt) return;
-      appendFinalLine(txt);
+      appendFinalLine(txt, false, 'Whisper ' + whisperShort_() + '/' + whisperDev + ' '
+        + ms + 'ms／語音 ' + whisperAudioSec_.toFixed(1) + 's／RTF ' + rtf.toFixed(2));
       sendToOpener(txt, true);
       document.getElementById('cmdInput').value = txt;
     })
@@ -819,14 +821,16 @@ function voskAttachRec_(sampleRate) {
     if (!txt) return;
     // 放開按鈕 → 拿到 final 的實際毫秒數。把「感覺很 lag」變成可比較的數字
     // （辨識時間 vs 語音長度＝即時率 RTF，>1 表示比講話還慢，那才是真的追不上）
+    var meta = '';
     if (voskReleaseAt_) {
       var ms = Date.now() - voskReleaseAt_;
       var rtf = voskAudioSec_ > 0 ? (ms / 1000 / voskAudioSec_) : 0;
+      meta = 'Vosk ' + ms + 'ms／語音 ' + voskAudioSec_.toFixed(1) + 's／RTF ' + rtf.toFixed(2);
       setStatus('辨識完成：放開後 ' + ms + 'ms（語音 ' + voskAudioSec_.toFixed(1) + 's、'
         + voskRecRate + 'Hz、即時率 ' + rtf.toFixed(2) + '）');
       voskReleaseAt_ = 0;
     }
-    appendFinalLine(txt);
+    appendFinalLine(txt, false, meta);
     sendToOpener(txt, true);
     document.getElementById('cmdInput').value = txt;
   });
@@ -992,7 +996,7 @@ function stopTalk() {
 }
 
 /* ── 字幕歷史區（typed=true 時加 ⌨ 標記，僅本頁顯示用，不進協定）── */
-function appendFinalLine(text, typed) {
+function appendFinalLine(text, typed, meta) {
   var host = document.getElementById('finalLines');
   var div = document.createElement('div');
   div.className = 'line';
@@ -1000,6 +1004,13 @@ function appendFinalLine(text, typed) {
   var hh = ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2) + ':' + ('0' + t.getSeconds()).slice(-2);
   div.innerHTML = '<span class="t">' + hh + (typed ? ' ⌨' : '') + '</span>';
   div.appendChild(document.createTextNode(text));
+  // 耗時／即時率掛在**逐字稿這一行**：狀態列會被下一句蓋掉，比較兩個引擎時需要留得住的歷史
+  if (meta) {
+    var m = document.createElement('span');
+    m.className = 'meta';
+    m.textContent = '　' + meta;
+    div.appendChild(m);
+  }
   host.appendChild(div);
   host.scrollTop = host.scrollHeight;
 }
