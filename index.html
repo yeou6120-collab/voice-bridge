@@ -587,6 +587,9 @@ function whisperInit() {
     setVoskBtn();
   }
   whisperState = 'loading'; setWhisperBtn();
+  // ⚠ s2t.js（簡→繁）原本只在 voskInit 裡載 ⇒ 只開 Whisper 時 normVosk_ 會炸
+  //   `s2t is not defined`（走查踩到）。這裡補載；失敗不擋（normVosk_ 已防呆）。
+  loadScript_('s2t.js', function () { /* 載不到就原樣輸出簡體 */ });
   setCheck('whisper', 'pend', '檢查模型來源（huggingface.co）…');
   // 探針：模型檔在執行期才抓，連不到的話 pipeline 會丟一個看不懂的錯 ⇒ 先問一次 config.json
   fetch('https://huggingface.co/' + model + '/resolve/main/config.json', { method: 'GET' })
@@ -891,10 +894,14 @@ function loadScript_(src, cb) {
   s.onerror = function () { cb(new Error('load fail: ' + src)); };
   document.head.appendChild(s);
 }
-/* 模型輸出正規化：去空格分詞＋簡→繁（s2t.js） */
+/* 模型輸出正規化：去空格分詞＋簡→繁（s2t.js）。**Vosk 與 Whisper 共用**。
+ * ⚠ s2t.js 是動態載入的：漏載時整句會炸在 `s2t is not defined`（Whisper 路徑踩過）
+ *   ⇒ 這裡防呆成「載不到就原樣回傳」——寧可留簡體讓解析端的拼音容錯層去吸收，
+ *   也不要把整句辨識結果丟掉。真正的修法是各引擎啟用時都要載它（見 whisperInit）。 */
 function normVosk_(s) {
   var t = String(s || '').replace(/\s+/g, '');
-  return t ? s2t(t) : '';
+  if (!t) return '';
+  return (typeof s2t === 'function') ? s2t(t) : t;
 }
 function voskAttachRec_(sampleRate) {
   if (voskRec && voskRecRate === sampleRate) return;
