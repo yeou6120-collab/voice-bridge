@@ -212,6 +212,8 @@ var VOICE_PROTO = {
   MSG_TRANSCRIPT: 'voice:transcript',                       // 橋接頁 → 考試頁 { type, v, text, final, ts, alts? }（alts＝final 的其餘辨識候選，舊端忽略即可）
   MSG_FEEDBACK: 'voice:feedback',                           // 考試頁 → 橋接頁 { type, v, ok, text, detail, ts }
   MSG_HELLO: 'voice:hello',                                 // 橋接頁 → 考試頁 { type, v, ts } 心跳：考試頁重整後靠它自動重新採用彈窗（免再開一個）
+  MSG_PTT: 'voice:ptt',                                     // 考試頁 → 橋接頁 { type, v, on, ts } 熱鍵中繼：3D 原生全螢幕會蓋住彈窗，改由考試頁按住熱鍵遙控收音（麥克風權限已授權，背景視窗照錄）
+  PTT_KEY: 'Space',                                         // 熱鍵（KeyboardEvent.code）；輸入框內不攔截
   HELLO_MS: 2000                                            // 心跳間隔
 };
 /* ==== VOICE-PROTO-END ==== */
@@ -287,10 +289,20 @@ function onFeedback(d) {
 }
 window.addEventListener('message', function (e) {
   var d = e.data;
-  if (!d || d.type !== VOICE_PROTO.MSG_FEEDBACK) return;
-  if (!boundOpener || e.source !== boundOpener) return;
+  if (!d || (d.type !== VOICE_PROTO.MSG_FEEDBACK && d.type !== VOICE_PROTO.MSG_PTT)) return;
+  if (!boundOpener || e.source !== boundOpener) return;   // 認視窗不認字串（GAS origin 是動態的）
   if (d.v !== VOICE_PROTO.V) {
     setStatus('考試頁協定版本不符（收到 v' + d.v + '，本頁 v' + VOICE_PROTO.V + '）：請兩邊都重新整理。', true);
+    return;
+  }
+  // 熱鍵中繼：考試頁按住熱鍵 → 這裡照樣走 startTalk/stopTalk。
+  // 麥克風權限**已經授權過**，背景視窗照錄得到 ⇒ 3D 開原生全螢幕（彈窗被蓋住）時語音仍可用。
+  if (d.type === VOICE_PROTO.MSG_PTT) {
+    if (d.on) {
+      if (listening) return;
+      startTalk();
+      setStatus('（考試頁熱鍵遙控）聽取中…');
+    } else stopTalk();
     return;
   }
   onFeedback(d);
