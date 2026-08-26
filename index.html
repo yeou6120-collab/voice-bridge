@@ -567,12 +567,22 @@ function whisperLoad_(model, forceWasm) {
     };
     return T.pipeline('automatic-speech-recognition', model, opt).then(function (pipe) {
       whisperPipe = pipe; whisperDev = gpu ? 'WebGPU' : 'wasm';
-      whisperState = 'ready';
-      try { localStorage.setItem(WHISPER_LS_KEY, model); } catch (e) {}
-      setCheck('whisper', 'ok', '已就緒（' + whisperShort_() + '／' + whisperDev + '；載入 '
-        + Math.round((Date.now() - t0) / 1000) + ' 秒）'
-        + (gpu ? '' : '　⚠ 沒有 WebGPU，辨識會明顯較慢——太慢請改 tiny 或退回 Vosk'));
-      setWhisperBtn(); setEngineBadge();
+      var loadSec = Math.round((Date.now() - t0) / 1000);
+      // ⚠ **暖機**：第一次推論要編譯 WebGPU shader／建計算圖，成本是後續的好幾倍
+      //   （走查實測第一句 7.2 秒）。這裡先拿 1 秒靜音跑一次，把那筆成本吃掉，
+      //   考生按下的第一句才不會特別慢。失敗不擋（暖機只是最佳化）。
+      setCheck('whisper', 'pend', '暖機中（第一次推論要編譯 shader）…');
+      var w0 = Date.now();
+      return pipe(new Float32Array(VOSK_RATE), whisperOpts_())
+        .catch(function () { return null; })
+        .then(function () {
+          whisperState = 'ready';
+          try { localStorage.setItem(WHISPER_LS_KEY, model); } catch (e) {}
+          setCheck('whisper', 'ok', '已就緒（' + whisperShort_() + '／' + whisperDev + '；載入 '
+            + loadSec + ' 秒、暖機 ' + ((Date.now() - w0) / 1000).toFixed(1) + ' 秒）'
+            + (gpu ? '' : '　⚠ 沒有 WebGPU，辨識會明顯較慢——太慢請改 tiny 或退回 Vosk'));
+          setWhisperBtn(); setEngineBadge();
+        });
     });
   }).catch(function (e) {
     // WebGPU 這條路壞掉（驅動不支援 q4／shader 編譯失敗…）不該整個功能陣亡：
@@ -630,7 +640,7 @@ function whisperStop_() {
   //   否則 Whisper 會把語速聽成 3 倍快，出來是亂碼。
   var rate = a.rate || VOSK_RATE;
   if (Math.abs(rate - VOSK_RATE) > 1) pcm = resampleTo16k_(pcm, rate);
-  whisperPipe(pcm, { language: 'chinese', task: 'transcribe', chunk_length_s: 30, return_timestamps: false })
+  whisperPipe(pcm, whisperOpts_())
     .then(function (out) {
       var txt = normVosk_((out && out.text) || '').replace(/[，。！？、,.!?]/g, '');
       var ms = Date.now() - whisperReleaseAt_;
@@ -646,6 +656,14 @@ function whisperStop_() {
     .catch(function (e) {
       setStatus('Whisper 辨識失敗：' + (e && e.message || e), true);
     });
+}
+/** 辨識參數（暖機與正式辨識共用同一組，否則暖機編出來的圖不是這一組）。
+ *  max_new_tokens 32：口令最長也就十幾個字，不設上限時 Whisper 對短音訊會自己編一長串
+ *  （幻覺），而每多一個 token 就多跑一次自迴歸解碼 ⇒ 又慢又錯。
+ *  language 寫死中文＝跳過語言偵測那一趟。 */
+function whisperOpts_() {
+  return { language: 'chinese', task: 'transcribe', chunk_length_s: 30,
+           return_timestamps: false, max_new_tokens: 32, num_beams: 1, do_sample: false };
 }
 /** 線性重取樣到 16kHz（只在 AudioContext 拿不到 16k 時才會用到） */
 function resampleTo16k_(pcm, rate) {
