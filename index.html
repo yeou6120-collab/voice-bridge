@@ -133,6 +133,9 @@
 <body>
   <h1>語音擺位橋接頁 <span id="engineBadge">偵測中…</span></h1>
   <div class="sub">本頁為 top-level 靜態頁（GAS 之外），負責收音、把逐字稿回送考試頁，並顯示假人動作回饋。</div>
+  <!-- ⚠ 版本戳：Pages 會被瀏覽器快取，沒有它就永遠在猜「我看到的是不是舊版」（走查踩過）。
+       改本頁時**一定要一起改這個字串**，否則它會謊報。 -->
+  <div class="sub" style="opacity:0.75;">版本 <b id="buildStamp">2026-08-26e</b>　協定 v<span id="protoV">?</span>　熱鍵中繼 <span id="pttCap">?</span>（硬重整 Ctrl+F5 可確認是否為最新）</div>
 
   <!-- ── 設備自檢 ─────────────────────────── -->
   <div class="card">
@@ -228,6 +231,7 @@ try {
 } catch (e) { /* 保持 '*' */ }
 
 var sentCount = 0;
+var pttRelayN_ = 0;              // 收到幾次熱鍵訊號——「按了沒反應」時第一個要看的數字
 // 心跳：每 HELLO_MS 送一則 voice:hello 給 opener。考試頁一旦重整/換頁，voiceWin 參照就沒了，
 // 原本只能再開一個彈窗；有心跳之後考試頁收到就把 e.source 重新採用為彈窗參照，自動接回來。
 // opener 是「那個分頁」的 WindowProxy，分頁內重新導覽不會換掉它，所以接得回去。
@@ -298,6 +302,9 @@ window.addEventListener('message', function (e) {
   // 熱鍵中繼：考試頁按住熱鍵 → 這裡照樣走 startTalk/stopTalk。
   // 麥克風權限**已經授權過**，背景視窗照錄得到 ⇒ 3D 開原生全螢幕（彈窗被蓋住）時語音仍可用。
   if (d.type === VOICE_PROTO.MSG_PTT) {
+    pttRelayN_++;
+    document.getElementById('sendStat').textContent =
+      '已收到考試頁熱鍵訊號 ' + pttRelayN_ + ' 次（最近：' + (d.on ? '按下' : '放開') + '）';
     if (d.on) {
       if (listening) return;
       startTalk();
@@ -1135,6 +1142,10 @@ function appendFinalLine(text, typed, meta) {
 
 /* ── 事件繫結 ─────────────────────────────── */
 window.addEventListener('DOMContentLoaded', function () {
+  document.getElementById('protoV').textContent = VOICE_PROTO.V;
+  document.getElementById('pttCap').innerHTML = VOICE_PROTO.MSG_PTT
+    ? '<b style="color:var(--ok);">支援（' + VOICE_PROTO.PTT_KEY + '）</b>'
+    : '<b style="color:var(--err);">不支援——此頁是舊版</b>';
   renderCheckRows();
   checkChrome();
   checkOpener();
