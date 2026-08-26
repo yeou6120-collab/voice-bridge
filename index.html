@@ -488,6 +488,7 @@ function installPack(btn) {
  * 啟用狀態記 localStorage：下次開頁自動初始化，考前不用再按一次。 */
 var VOSK_MODEL_URL = 'vosk-model-small-cn-0.22.tar.gz';
 var VOSK_LS_KEY = 'bridge_vosk_v1';
+var VOSK_TIMEOUT_MS = 120000;     // 看門狗：createModel 多半不會 reject，卡住要自己喊
 var voskState = 'off';            // 'off' | 'loading' | 'ready' | 'error'
 var voskModel = null, voskRec = null, voskRecRate = 0;
 var voskAudio = null;             // PTT 期間的 { stream, ctx, src, node }
@@ -522,18 +523,86 @@ function voskInit() {
       setVoskBtn(); setEngineBadge();
       return;
     }
-    setCheck('vosk', 'pend', '模型下載／載入中（首次約 41MB，之後走瀏覽器快取）…');
-    Vosk.createModel(VOSK_MODEL_URL).then(function (model) {
-      voskModel = model; voskState = 'ready';
-      try { localStorage.setItem(VOSK_LS_KEY, '1'); } catch (e) {}
-      setCheck('vosk', 'ok', '已就緒（完全離線、不經任何伺服器）');
-      setVoskBtn(); setEngineBadge();
-    }).catch(function (e) {
-      voskState = 'error';
-      setCheck('vosk', 'fail', '模型載入失敗：' + (e && e.message || e) + '——退回原本引擎');
-      setVoskBtn(); setEngineBadge();
+    // ⚠ `Vosk.createModel` 的下載與解壓都在 worker 裡，**失敗多半不會 reject**
+    //   （worker 內的 emscripten abort／404 拿不到 tar 都只是不再往下走）⇒ 症狀是
+    //   「一直卡在模型載入中」而不是印出錯誤。所以這裡先做兩件事再交給它：
+    //     ① 512 bytes 的 Range 探針——404／Git LFS 指標／不是 gzip／檔案太小，
+    //        這四種一次就分得出來，而且只花半 KB（不重複下載 41MB）
+    //     ② 看門狗——超過 VOSK_TIMEOUT_MS 就把「卡住」轉成明確訊息並退回原引擎；
+    //        真的只是慢的話，之後 promise 仍會 resolve，settled 旗標會把它補回 ready
+    voskProbe_(voskModelUrl_(), function (perr, info) {
+      if (perr) {
+        voskState = 'error';
+        setCheck('vosk', 'fail', perr.message + '——退回原本引擎');
+        setVoskBtn(); setEngineBadge();
+        return;
+      }
+      var t0 = Date.now(), settled = false;
+      var tick = setInterval(function () {
+        if (settled) return;
+        var sec = Math.round((Date.now() - t0) / 1000);
+        setCheck('vosk', 'pend', '模型下載／解壓中…已 ' + sec + ' 秒（' + info.sizeTxt
+          + '；首次才下載，之後走瀏覽器快取）');
+        if (sec * 1000 >= VOSK_TIMEOUT_MS) {
+          clearInterval(tick);
+          voskState = 'error'; setVoskBtn(); setEngineBadge();
+          setCheck('vosk', 'fail', '模型載入超過 ' + Math.round(VOSK_TIMEOUT_MS / 1000)
+            + ' 秒沒有回應（檔案本身正常：' + info.sizeTxt + '）。'
+            + '常見原因：網路慢（41MB 還在下載，可再等）／worker 內解壓失敗'
+            + '（跨源隔離 crossOriginIsolated=' + (self.crossOriginIsolated ? 'true' : 'false')
+            + '，SharedArrayBuffer=' + (typeof SharedArrayBuffer === 'undefined' ? '不可用' : '可用')
+            + '）／記憶體不足。先退回原本引擎，載完會自動切過去。');
+        }
+      }, 5000);
+      setCheck('vosk', 'pend', '模型下載／解壓中…（' + info.sizeTxt + '）');
+      Vosk.createModel(voskModelUrl_()).then(function (model) {
+        settled = true; clearInterval(tick);
+        voskModel = model; voskState = 'ready';
+        try { localStorage.setItem(VOSK_LS_KEY, '1'); } catch (e) {}
+        setCheck('vosk', 'ok', '已就緒（完全離線、不經任何伺服器）'
+          + '　載入耗時 ' + Math.round((Date.now() - t0) / 1000) + ' 秒');
+        setVoskBtn(); setEngineBadge();
+      }).catch(function (e) {
+        settled = true; clearInterval(tick);
+        voskState = 'error';
+        setCheck('vosk', 'fail', '模型載入失敗：' + (e && e.message || e) + '——退回原本引擎');
+        setVoskBtn(); setEngineBadge();
+      });
     });
   });
+  });
+}
+/** 模型的**絕對**網址：worker 內的相對路徑基準未必是本頁（blob worker 會解錯） */
+function voskModelUrl_() {
+  try { return new URL(VOSK_MODEL_URL, location.href).href; } catch (e) { return VOSK_MODEL_URL; }
+}
+/** 512 bytes Range 探針：把「卡住」拆成四種說得出口的失敗 */
+function voskProbe_(url, cb) {
+  if (typeof fetch !== 'function') { cb(null, { sizeTxt: '大小未知' }); return; }   // 探不了就別擋
+  fetch(url, { headers: { Range: 'bytes=0-511' } }).then(function (res) {
+    if (res.status === 404) throw new Error('模型檔不存在（404）：' + url
+      + '——vosk-model-small-cn-0.22.tar.gz 沒有推到橋接頁的部署面（Pages 是獨立部署，clasp 不會推它）');
+    if (!res.ok && res.status !== 206) throw new Error('模型檔讀取失敗（HTTP ' + res.status + '）');
+    var cr = res.headers.get('Content-Range') || '';
+    var total = cr ? Number(cr.split('/')[1]) : Number(res.headers.get('Content-Length') || 0);
+    return res.arrayBuffer().then(function (buf) { return { buf: buf, total: total, ct: res.headers.get('Content-Type') || '' }; });
+  }).then(function (r) {
+    var b = new Uint8Array(r.buf);
+    var head = '';
+    for (var i = 0; i < Math.min(b.length, 40); i++) head += String.fromCharCode(b[i]);
+    if (head.indexOf('version https://git-lfs') === 0)
+      throw new Error('模型檔是 Git LFS 指標檔，不是真的模型——GitHub Pages **不會**還原 LFS 內容，'
+        + '請把 tar.gz 從 LFS 移出、以一般檔案重推（41MB 未超過 Pages 的單檔上限）');
+    if (!(b[0] === 0x1f && b[1] === 0x8b))
+      throw new Error('模型檔不是 gzip（Content-Type: ' + r.ct + '；前幾個位元組「'
+        + head.replace(/[^\x20-\x7e]/g, '.').slice(0, 24) + '」）——多半是 404 頁面或檔案被改寫過');
+    if (r.total && r.total < 1024 * 1024)
+      throw new Error('模型檔只有 ' + r.total + ' bytes（應約 41MB）——上傳不完整');
+    cb(null, { sizeTxt: r.total ? (r.total / 1048576).toFixed(1) + 'MB' : '大小未知' });
+  }).catch(function (e) {
+    // 網路層失敗（離線／被擋）也要說得出口，但不要把「探針失敗」當成模型壞掉
+    if (e && e.message && /模型檔/.test(e.message)) cb(e);
+    else cb(null, { sizeTxt: '大小未知（探針失敗：' + (e && e.message || e) + '）' });
   });
 }
 var loadedScripts_ = {};
