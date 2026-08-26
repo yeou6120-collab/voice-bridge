@@ -142,6 +142,14 @@
       <button id="btnMicTest">麥克風自檢（getUserMedia）</button>
       <button id="btnInstall" style="display:none">下載 zh-TW 語言包</button>
       <button id="btnVosk">啟用本地離線辨識（首次下載約 41MB）</button>
+      <span style="display:inline-flex; gap:6px; align-items:center;">
+        <button id="btnWhisper">啟用本地 Whisper 辨識</button>
+        <select id="whisperModel" title="模型愈大愈準也愈慢；先用 base，太慢改 tiny、不夠準改 small">
+          <option value="Xenova/whisper-tiny">tiny（最快、最不準）</option>
+          <option value="Xenova/whisper-base" selected>base（預設）</option>
+          <option value="Xenova/whisper-small">small（最準、最慢）</option>
+        </select>
+      </span>
     </div>
   </div>
 
@@ -293,7 +301,8 @@ var CHECK_DEFS = [
   { id: 'opener', label: '考試頁連線' },
   { id: 'mic',    label: '麥克風權限' },
   { id: 'pack',   label: 'zh-TW 語言包' },
-  { id: 'vosk',   label: '本地離線辨識' }
+  { id: 'vosk',   label: '本地離線辨識' },
+  { id: 'whisper', label: '本地 Whisper' }
 ];
 var MARKS = { ok: '✓', warn: '△', fail: '✗', pend: '…' };
 function renderCheckRows() {
@@ -406,12 +415,13 @@ var engineMode = 'none';   // 'ondevice' | 'cloud' | 'none'
 
 function setEngineBadge() {
   var b = document.getElementById('engineBadge');
-  if (voskState === 'ready') { b.textContent = '本地離線辨識（Vosk）'; b.className = 'ondevice'; }
+  if (whisperState === 'ready') { b.textContent = '本地 Whisper（' + whisperShort_() + '）'; b.className = 'ondevice'; }
+  else if (voskState === 'ready') { b.textContent = '本地離線辨識（Vosk）'; b.className = 'ondevice'; }
   else if (engineMode === 'ondevice') { b.textContent = 'on-device 辨識'; b.className = 'ondevice'; }
   else if (engineMode === 'cloud') { b.textContent = '雲端辨識（降級）'; b.className = 'cloud'; }
   else { b.textContent = '語音不可用'; b.className = 'none'; }
   var ptt = document.getElementById('pttBtn');
-  if (voskState !== 'ready' && engineMode === 'none') {
+  if (whisperState !== 'ready' && voskState !== 'ready' && engineMode === 'none') {
     ptt.disabled = true;
     ptt.textContent = '語音不可用（可改用下方打字輸入）';
   } else {
@@ -477,6 +487,172 @@ function installPack(btn) {
     btn.textContent = '下載 zh-TW 語言包';
     setCheck('pack', 'fail', '下載失敗：' + e.message);
   });
+}
+
+/* ── 本地 Whisper 辨識（transformers.js＋ONNX Runtime Web）────────────
+ * 為什麼要第五個引擎：Vosk 的中文小模型（42MB）對「閉氣」「蹠屈」「準直」這類詞
+ * 辨識率偏低，而它的大模型是 1.3GB、瀏覽器扛不動。Whisper 走**批次**辨識——
+ * push-to-talk 放開按鈕才把整段音訊送進去，正好是這個頁面的互動模式（不需要串流），
+ * 中文辨識率明顯優於 vosk-small。
+ * 佈署面：函式庫與 ONNX Runtime 的 wasm **與本頁同源**（asr/ 資料夾，npm 版本固定），
+ *   **模型檔在執行期從 Hugging Face 抓**（首次下載後進瀏覽器 Cache Storage）。
+ *   ⇒ 考場第一次用要連得到 huggingface.co；連不到會由下面的探針講清楚。
+ * 速度：有 WebGPU 走 GPU（快很多）；沒有就退 wasm 單執行緒——GitHub Pages 設不了
+ *   COOP/COEP，`crossOriginIsolated` 必為 false ⇒ ORT 開不了多執行緒，這是硬限制。
+ * 輸出可能是簡體 → 與 Vosk 共用 normVosk_（去空格＋s2t 轉繁）。 */
+var WHISPER_LS_KEY = 'bridge_whisper_v1';
+var whisperState = 'off';        // 'off' | 'loading' | 'ready' | 'error'
+var whisperPipe = null, whisperDev = '', whisperAudio = null, whisperChunks = null;
+var whisperReleaseAt_ = 0, whisperAudioSec_ = 0;
+
+function whisperModelId_() {
+  var sel = document.getElementById('whisperModel');
+  return (sel && sel.value) || 'Xenova/whisper-base';
+}
+function whisperShort_() { return whisperModelId_().split('/').pop().replace('whisper-', ''); }
+function setWhisperBtn() {
+  var btn = document.getElementById('btnWhisper');
+  if (!btn) return;
+  if (whisperState === 'ready') btn.textContent = '停用本地 Whisper';
+  else if (whisperState === 'loading') btn.textContent = '模型載入中…';
+  else btn.textContent = '啟用本地 Whisper 辨識';
+  btn.disabled = (whisperState === 'loading');
+}
+function whisperToggle() {
+  if (whisperState === 'ready') {
+    whisperPipe = null; whisperState = 'off';
+    try { localStorage.removeItem(WHISPER_LS_KEY); } catch (e) {}
+    setCheck('whisper', 'warn', '已停用——退回 Vosk／on-device／雲端');
+    setWhisperBtn(); setEngineBadge();
+    return;
+  }
+  whisperInit();
+}
+function whisperInit() {
+  if (whisperState === 'loading' || whisperState === 'ready') return;
+  var model = whisperModelId_();
+  whisperState = 'loading'; setWhisperBtn();
+  setCheck('whisper', 'pend', '檢查模型來源（huggingface.co）…');
+  // 探針：模型檔在執行期才抓，連不到的話 pipeline 會丟一個看不懂的錯 ⇒ 先問一次 config.json
+  fetch('https://huggingface.co/' + model + '/resolve/main/config.json', { method: 'GET' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return whisperLoad_(model);
+    })
+    .catch(function (e) {
+      whisperState = 'error'; setWhisperBtn(); setEngineBadge();
+      setCheck('whisper', 'fail', '連不到模型來源 huggingface.co（' + (e && e.message || e) + '）——'
+        + '考場網路擋掉的話這條路走不通，請改用 Vosk 或雲端辨識');
+    });
+}
+function whisperLoad_(model, forceWasm) {
+  var gpu = !!navigator.gpu && !forceWasm;
+  setCheck('whisper', 'pend', '載入函式庫與模型（' + whisperShort_() + '、'
+    + (gpu ? 'WebGPU' : 'wasm 單執行緒') + '）…首次要下載，之後走瀏覽器快取');
+  // 動態 import：沒啟用就完全不下載這 868KB＋21MB 的 wasm
+  return import('./asr/transformers.min.js').then(function (T) {
+    T.env.backends.onnx.wasm.wasmPaths = new URL('./asr/', location.href).href;
+    T.env.allowLocalModels = false;          // 模型不在本站，別去猜本地路徑
+    var t0 = Date.now();
+    var opt = gpu
+      ? { device: 'webgpu', dtype: { encoder_model: 'fp32', decoder_model_merged: 'q4' } }
+      : { device: 'wasm', dtype: 'q8' };
+    opt.progress_callback = function (p) {
+      if (p && p.status === 'progress' && p.total) {
+        var pct = Math.round(p.loaded / p.total * 100);
+        setCheck('whisper', 'pend', '下載模型 ' + (p.file || '') + ' ' + pct + '%（'
+          + whisperShort_() + '、' + (gpu ? 'WebGPU' : 'wasm') + '）');
+      }
+    };
+    return T.pipeline('automatic-speech-recognition', model, opt).then(function (pipe) {
+      whisperPipe = pipe; whisperDev = gpu ? 'WebGPU' : 'wasm';
+      whisperState = 'ready';
+      try { localStorage.setItem(WHISPER_LS_KEY, model); } catch (e) {}
+      setCheck('whisper', 'ok', '已就緒（' + whisperShort_() + '／' + whisperDev + '；載入 '
+        + Math.round((Date.now() - t0) / 1000) + ' 秒）'
+        + (gpu ? '' : '　⚠ 沒有 WebGPU，辨識會明顯較慢——太慢請改 tiny 或退回 Vosk'));
+      setWhisperBtn(); setEngineBadge();
+    });
+  }).catch(function (e) {
+    // WebGPU 這條路壞掉（驅動不支援 q4／shader 編譯失敗…）不該整個功能陣亡：
+    // 自動退一次 wasm 再試，兩條都不行才報錯
+    if (gpu) {
+      setCheck('whisper', 'pend', 'WebGPU 失敗（' + (e && e.message || e) + '），改試 wasm…');
+      return whisperLoad_(model, true);
+    }
+    whisperState = 'error'; setWhisperBtn(); setEngineBadge();
+    setCheck('whisper', 'fail', '載入失敗：' + (e && e.message || e)
+      + '（asr/ 資產檔沒推到 Pages？或模型下載中斷）——退回原本引擎');
+  });
+}
+/* PTT：按住期間只**收集**音訊（16kHz 單聲道 Float32），放開才辨識。
+   與 Vosk 走同一套 AudioContext／ScriptProcessor，差別只在這裡不即時送進引擎。 */
+function whisperStart_() {
+  whisperChunks = [];
+  whisperAudioSec_ = 0;
+  navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 }
+  }).then(function (stream) {
+    if (!listening) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+    var ctx;
+    try { ctx = new AudioContext({ sampleRate: VOSK_RATE }); } catch (e) { ctx = new AudioContext(); }
+    var src = ctx.createMediaStreamSource(stream);
+    var node = ctx.createScriptProcessor(2048, 1, 1);
+    node.onaudioprocess = function (ev) {
+      if (!listening) return;
+      whisperChunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));   // 必須複製：緩衝會被重用
+      whisperAudioSec_ += ev.inputBuffer.duration;
+    };
+    src.connect(node); node.connect(ctx.destination);
+    whisperAudio = { stream: stream, ctx: ctx, src: src, node: node, rate: ctx.sampleRate };
+    setStatus('收音中…（放開按鈕才辨識）');
+  }).catch(function (err) {
+    setStatus('麥克風失敗：' + err.name + '（' + err.message + '）', true);
+    stopTalk();
+  });
+}
+function whisperStop_() {
+  if (!whisperAudio) return;
+  var a = whisperAudio; whisperAudio = null;
+  whisperReleaseAt_ = Date.now();
+  try { a.src.disconnect(); a.node.disconnect(); } catch (e) {}
+  try { a.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+  try { a.ctx.close(); } catch (e) {}
+  var chunks = whisperChunks || []; whisperChunks = null;
+  var n = chunks.reduce(function (t, c) { return t + c.length; }, 0);
+  if (!n || !whisperPipe) { setStatus('沒有收到音訊'); return; }
+  var pcm = new Float32Array(n), off = 0;
+  chunks.forEach(function (c) { pcm.set(c, off); off += c.length; });
+  if (whisperAudioSec_ < 0.35) { setStatus('太短了（' + whisperAudioSec_.toFixed(2) + 's）——請按住說完再放開', true); return; }
+  setStatus('辨識中…（' + whisperAudioSec_.toFixed(1) + 's／' + whisperDev + '）');
+  // ⚠ 取樣率必須是 16k：AudioContext 開不到 16k 的機器（少數）先線性重取樣，
+  //   否則 Whisper 會把語速聽成 3 倍快，出來是亂碼。
+  var rate = a.rate || VOSK_RATE;
+  if (Math.abs(rate - VOSK_RATE) > 1) pcm = resampleTo16k_(pcm, rate);
+  whisperPipe(pcm, { language: 'chinese', task: 'transcribe', chunk_length_s: 30, return_timestamps: false })
+    .then(function (out) {
+      var txt = normVosk_((out && out.text) || '').replace(/[，。！？、,.!?]/g, '');
+      var ms = Date.now() - whisperReleaseAt_;
+      var rtf = whisperAudioSec_ > 0 ? (ms / 1000 / whisperAudioSec_) : 0;
+      setStatus('辨識完成：放開後 ' + ms + 'ms（語音 ' + whisperAudioSec_.toFixed(1) + 's、'
+        + whisperDev + '、即時率 ' + rtf.toFixed(2) + '）' + (txt ? '' : '——沒有聽到內容'));
+      if (!txt) return;
+      appendFinalLine(txt);
+      sendToOpener(txt, true);
+      document.getElementById('cmdInput').value = txt;
+    })
+    .catch(function (e) {
+      setStatus('Whisper 辨識失敗：' + (e && e.message || e), true);
+    });
+}
+/** 線性重取樣到 16kHz（只在 AudioContext 拿不到 16k 時才會用到） */
+function resampleTo16k_(pcm, rate) {
+  var ratio = rate / VOSK_RATE, out = new Float32Array(Math.floor(pcm.length / ratio));
+  for (var i = 0; i < out.length; i++) {
+    var x = i * ratio, i0 = Math.floor(x), i1 = Math.min(i0 + 1, pcm.length - 1), f = x - i0;
+    out[i] = pcm[i0] * (1 - f) + pcm[i1] * f;
+  }
+  return out;
 }
 
 /* ── 本地離線辨識（Vosk WASM）──────────────────────────
@@ -782,7 +958,7 @@ function onRecError(ev) {
 
 function startTalk() {
   if (listening) return;
-  if (voskState !== 'ready' && engineMode === 'none') return;
+  if (whisperState !== 'ready' && voskState !== 'ready' && engineMode === 'none') return;
   listening = true;
   document.getElementById('pttBtn').classList.add('listening');
   document.getElementById('pttBtn').textContent = '● 聽取中…（放開結束）';
@@ -790,7 +966,8 @@ function startTalk() {
   inp.value = '';
   inp.readOnly = true;    // 辨識期間唯讀：interim 流會覆寫，不讓打字互搶
   setStatus('');
-  if (voskState === 'ready') { voskStart_(); return; }   // 本地離線優先，不碰 Web Speech
+  if (whisperState === 'ready') { whisperStart_(); return; }   // Whisper 最優先（批次辨識，放開才跑）
+  if (voskState === 'ready') { voskStart_(); return; }   // 其次本地 Vosk，不碰 Web Speech
   recognizer = newRecognizer();   // 每次按下都用全新實例，避免殘留狀態
   try {
     recognizer.start();
@@ -806,6 +983,7 @@ function stopTalk() {
   document.getElementById('pttBtn').classList.remove('listening');
   document.getElementById('pttBtn').textContent = '🎙 按住說話';
   document.getElementById('cmdInput').readOnly = false;
+  whisperStop_();   // Whisper 路徑：放開才把整段音訊送去辨識（沒在用時是 no-op）
   voskStop_();   // 本地離線路徑的收尾（沒在用時是 no-op）
   if (recognizer) {
     try { recognizer.stop(); } catch (e) { /* 已停就算了 */ }
@@ -840,6 +1018,17 @@ window.addEventListener('DOMContentLoaded', function () {
   if (voskOn) voskInit();
   else setCheck('vosk', 'warn', '未啟用——啟用後完全離線辨識，免網路、術語同音誤辨由考試頁拼音層吸收');
   document.getElementById('btnVosk').addEventListener('click', voskToggle);
+  setWhisperBtn();
+  var wOn = '';
+  try { wOn = localStorage.getItem(WHISPER_LS_KEY) || ''; } catch (e) {}
+  if (wOn) { document.getElementById('whisperModel').value = wOn; whisperInit(); }
+  else setCheck('whisper', 'warn', '未啟用——辨識率明顯優於 Vosk（放開按鈕才批次辨識）；首次要下載模型');
+  document.getElementById('btnWhisper').addEventListener('click', whisperToggle);
+  document.getElementById('whisperModel').addEventListener('change', function () {
+    if (whisperState === 'ready' || whisperState === 'loading') {
+      setCheck('whisper', 'warn', '模型換成 ' + whisperShort_() + '——請按「停用」再「啟用」重新載入');
+    }
+  });
 
   var ptt = document.getElementById('pttBtn');
   ptt.addEventListener('pointerdown', function (ev) {
